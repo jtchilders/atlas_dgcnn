@@ -159,6 +159,7 @@ def main():
          train_loss_metric += tf.reduce_mean(loss_value)
 
          pred = tf.argmax(pred,-1)
+         logger.info('pred %s labels %s',pred,labels)
          if class_weights is not None:
             correct = tf.math.reduce_sum(class_weights*tf.math.equal(pred,labels))
             total_nonzero += tf.math.reduce_sum(class_weights)
