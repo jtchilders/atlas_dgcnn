@@ -116,10 +116,15 @@ def load_csv_file_py(filename):
    df_labels = np.squeeze(df_labels,-1)
    # tf.print('df_labels: ',df_labels.shape)
 
+   # pad with zeros or clip some points
+   labels = np.zeros([gconfig['data']['num_points']])
+   df_labels_num_points = np.min([df_labels.shape[0],gnum_points])
+   labels[0:df_labels_num_points] = df_labels[0:df_labels_num_points]
+
    # count number of each class
    # use the lowest to decide weights for loss function
    # get list of unique classes and their occurance count
-   unique_classes,unique_counts = np.unique(df_labels,return_counts=True)
+   unique_classes,unique_counts = np.unique(labels,return_counts=True)
    # get mininum class occurance count
    min_class_count = np.min(unique_counts)
    # tf.print('min_class_count:',min_class_count,unique_classes,unique_counts)
@@ -129,19 +134,10 @@ def load_csv_file_py(filename):
    # set weights to one for an equal number of classes
    for class_label in unique_classes:
       # tf.print('class_label:',class_label)
-      class_indices = np.nonzero(df_labels == class_label)[0]
+      class_indices = np.nonzero(labels == class_label)[0]
       class_indices = np.random.choice(class_indices,size=[min_class_count],replace=False)
       class_weights[class_indices] = 1
       # tf.print('3: ',np.unique(class_weights,return_counts=True))
-
-   # unique_classes_count = np.zeros(gconfig['data']['num_classes'])
-   # for i,j in enumerate(unique_classes):
-   #    unique_classes_count[j] = counts[i]
-
-   # pad with zeros
-   labels = np.zeros([gconfig['data']['num_points']])
-   df_labels_num_points = np.min([df_labels.shape[0],gnum_points])
-   labels[0:df_labels_num_points] = df_labels[0:df_labels_num_points]
 
    # return inputs and labels
    return inputs,labels,class_weights
