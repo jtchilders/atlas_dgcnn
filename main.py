@@ -143,13 +143,13 @@ def main():
       for trainds_entry in trainds:
          if config['data']['handler'] == 'atlas_pointcloud_csv':
             inputs, labels, class_weights = trainds_entry
-            logger.info('inputs: %s labels = %s class_weights = %s',inputs.shape,labels.shape,class_weights.shape)
+            #logger.info('inputs: %s labels = %s class_weights = %s',inputs.shape,labels.shape,class_weights.shape)
          else:
             inputs,labels = trainds_entry
             class_weights = None
          
          loss_value,pred = train_step(net,loss_func,opt,inputs,labels,first_batch,hvd,config['model']['name'],class_weights)
-         logger.info('loss = %s',loss_value)
+         #logger.info('loss = %s',loss_value)
          tf.summary.experimental.set_step(batch_num + batches_per_epoch * epoch_num)
 
          first_batch = False
