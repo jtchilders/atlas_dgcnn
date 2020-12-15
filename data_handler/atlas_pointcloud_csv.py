@@ -103,7 +103,8 @@ def load_csv_file_py(filename):
 
    # stuff ragged event sizes into fixed size
    inputs = np.zeros([gnum_points,gnum_features])
-   inputs[0:df_inputs.shape[0],...] = df_inputs
+   df_inputs_num_points = np.min([df_inputs.shape[0],gnum_points])
+   inputs[0:df_inputs_num_points,...] = df_inputs[0:df_inputs_num_points,...]
 
    # build the labels
    df_labels = df[['pid']]
@@ -139,7 +140,8 @@ def load_csv_file_py(filename):
 
    # pad with zeros
    labels = np.zeros([gconfig['data']['num_points']])
-   labels[0:df_labels.shape[0]] = df_labels
+   df_labels_num_points = np.min([df_labels.shape[0],gnum_points])
+   labels[0:df_labels_num_points] = df_labels[0:df_labels_num_points]
 
    # return inputs and labels
    return inputs,labels,class_weights
