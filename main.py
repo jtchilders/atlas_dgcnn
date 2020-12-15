@@ -126,7 +126,6 @@ def main():
    for epoch_num in range(config['training']['epochs']):
       
       train_loss_metric = 0
-      train_accuracy_metric = 0
 
       logger.info('begin epoch %s',epoch_num)
 
@@ -135,6 +134,8 @@ def main():
       image_rate_sum = 0.
       image_rate_sum2 = 0.
       image_rate_n = 0.
+      total_correct = 0.
+      total_nonzero = 0.
       partial_img_rate = np.zeros(10)
       partial_img_rate_counter = 0
       if rank == args.profrank and args.profiler:
@@ -156,8 +157,16 @@ def main():
          batch_num += 1
 
          train_loss_metric += tf.reduce_mean(loss_value)
-         train_accuracy_metric += tf.divide(tf.reduce_sum(tf.cast(tf.equal(tf.argmax(pred,-1,tf.int32),tf.cast(labels,tf.int32)),tf.int32)),tf.shape(labels,tf.int32))
 
+         pred = tf.argmax(pred,-1)
+         if class_weights is not None:
+            correct = tf.math.reduce_sum(class_weights*tf.math.equal(pred,labels))
+            total_nonzero += tf.math.reduce_sum(class_weights)
+         else:
+            correct = tf.math.reduce_sum(tf.math.equal(pred,labels))
+            total_nonzero += batch_size
+         total_correct += correct
+         
          if batch_num % status_count == 0:
             img_per_sec = status_count * batch_size * nranks / (time.time() - start)
             img_per_sec_std = 0
@@ -170,7 +179,9 @@ def main():
                img_per_sec = np.mean(partial_img_rate[partial_img_rate>0])
                img_per_sec_std = np.std(partial_img_rate[partial_img_rate>0])
             loss = train_loss_metric / status_count
-            acc = (train_accuracy_metric / status_count)[0]
+            acc = float(total_correct) / total_nonzero
+            total_correct = 0
+            total_nonzero = 0
             logger.info(" [%5d:%5d]: loss = %10.5f acc = %10.5f  imgs/sec = %7.1f +/- %7.1f",
                            epoch_num,batch_num,loss.numpy(),acc.numpy(),img_per_sec,img_per_sec_std)
             if rank == 0:
@@ -183,7 +194,6 @@ def main():
                   tf.summary.scalar('learning_rate',opt._decayed_lr(tf.float32))
             start = time.time()
             train_loss_metric = 0
-            train_accuracy_metric = 0
             
                 
          if args.batch_term == batch_num:
@@ -203,35 +213,44 @@ def main():
          std_img_rate = np.sqrt((1/image_rate_n) * image_rate_sum2 - ave_img_rate*ave_img_rate)
          logger.info('batches_per_epoch = %s  Ave Img Rate: %10.5f +/- %10.5f',batches_per_epoch,ave_img_rate,std_img_rate)
       
-      test_loss_metric = 0.
-      test_accuracy_metric = 0.
-      for test_num,(test_inputs, test_labels) in enumerate(testds):
-         #logger.info("test_inputs shape: %s test_labels shape: %s",test_inputs.shape,test_labels.shape)
-         loss_value,pred = test_step(net,loss_func,test_inputs, test_labels, config['model']['name'])
-         #logger.info("loss_value shape: %s pred shape: %s",loss_value.shape,pred.shape)
-         #logger.info("loss_value: %s  pred: %s pred_label: %s",loss_value,tf.argmax(tf.nn.softmax(pred,-1),-1)[0:10],test_labels[0:10])
+      total_loss = 0.
+      total_correct = 0.
+      total_nonzero = 0.
+      for test_num,testds_entry in enumerate(testds):
+         if config['data']['handler'] == 'atlas_pointcloud_csv':
+            inputs, labels, class_weights = testds_entry
+            #logger.info('inputs: %s labels = %s class_weights = %s',inputs.shape,labels.shape,class_weights.shape)
+         else:
+            inputs,labels = testds_entry
+            class_weights = None
+      
+         loss_value,pred = test_step(net,loss_func,inputs, labels, config['model']['name'])
+         
+         total_loss += tf.reduce_mean(loss_value)
 
-         test_loss_metric += tf.reduce_mean(loss_value)
-         test_accuracy_metric += tf.divide(tf.reduce_sum(tf.cast(tf.equal(tf.argmax(pred,-1,tf.int32),tf.cast(test_labels,tf.int32)),tf.int32)),tf.shape(test_labels,tf.int32))
+         pred = tf.argmax(pred,-1)
+         if class_weights is not None:
+            correct = tf.math.reduce_sum(class_weights * tf.math.equal(pred,labels))
+            total_nonzero += tf.math.reduce_sum(class_weights)
+         else:
+            correct = tf.math.reduce_sum(tf.math.equal(pred,labels))
+            total_nonzero += batch_size
 
-         test_loss = test_loss_metric / test_num
-         test_accuracy = test_accuracy_metric / test_num
+         total_correct += correct
 
-         if (test_num + 1) % status_count == 0:
+
+         if test_num % status_count == 0:
+            test_loss = total_loss / test_num
+            test_accuracy = total_correct / total_nonzero
             logger.info(' [%5d:%5d]: test loss = %10.5f  test acc = %10.5f',
                          epoch_num,test_num,test_loss,test_accuracy)
-
-      # test_loss = tf.constant(test_loss_metric.result())
-      # test_acc = tf.constant(test_accuracy_metric.result())
-      # mean_test_loss = hvd.allreduce(test_loss)
-      # mean_test_acc = hvd.allreduce(test_acc)
 
       if rank == 0:
          with test_summary_writer.as_default():
             tf.summary.scalar('loss', test_loss, step=epoch_num * batches_per_epoch + batch_num)
             tf.summary.scalar('accuracy', test_accuracy[0], step=epoch_num * batches_per_epoch + batch_num)
          ave_img_rate = image_rate_sum / image_rate_n
-         std_img_rate = np.sqrt((1/image_rate_n) * image_rate_sum2 - ave_img_rate*ave_img_rate)
+         std_img_rate = np.sqrt((1/image_rate_n) * image_rate_sum2 - ave_img_rate * ave_img_rate)
          template = 'Epoch {:10.5f}, Loss: {:10.5f}, Accuracy: {:10.5f}, Test Loss: {:10.5f}, Test Accuracy: {:10.5f} Average Image Rate: {:10.5f} +/- {:10.5f}'
          logger.info(template.format(epoch_num + 1,
                                loss,
