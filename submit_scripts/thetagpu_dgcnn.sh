@@ -1,6 +1,6 @@
-#!/bin/bash
+#!/bin/bash -l
 #COBALT -O logdir/$COBALT_JOBID
-#COBALT -t 30
+#COBALT -t 180
 #COBALT -n 2
 #COBALT -A datascience
 
@@ -19,16 +19,16 @@ if [ $RANKS -gt 1 ]; then
    EXEC="mpirun -n $RANKS -npernode $PPN -hostfile $COBALT_NODEFILE $(which python)"
 fi
 
-echo $EXEC
-
-export OMP_NUM_THREADS=64
+echo EXEC=$EXEC
+echo NODES=$(cat $COBALT_NODEFILE)
+export OMP_NUM_THREADS=16
 echo LD_LIBRARY_PATH=$LD_LIBRARY_PATH
 echo PATH=$PATH
 echo which python = $(which python)
-LOGDIR=logdir/$COBALT_JOBID/$(date +"%Y-%m-%d-%H-%M")/conda
+LOGDIR=logdir/$COBALT_JOBID/$(date +"%Y-%m-%d-%H-%M")
 mkdir -p $LOGDIR
 echo $LOGDIR
-cp $0 $LOGDIR/
+cp $0 logdir/$COBALT_JOBID.sh
 #export TF_ENABLE_AUTO_MIXED_PRECISION=1
 #export TF_XLA_FLAGS=--tf_xla_auto_jit=1
 #export TF_XLA_FLAGS=--tf_xla_auto_jit=fusible
