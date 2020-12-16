@@ -8,6 +8,7 @@ import tensorflow as tf
 from tensorflow.keras.mixed_precision import experimental as mixed_precision
 import data_handler
 import model,lr_func,losses,accuracies
+import sklearn.metrics
 
 logger = logging.getLogger(__name__)
 DEFAULT_CONFIG = 'config.json'
@@ -123,6 +124,7 @@ def main():
    exit = False
    status_count = config['training']['status']
    batch_size = config['data']['batch_size']
+   num_points = config['data']['num_points']
    for epoch_num in range(config['training']['epochs']):
       
       train_loss_metric = 0
@@ -135,7 +137,10 @@ def main():
       image_rate_sum2 = 0.
       image_rate_n = 0.
       total_correct = 0.
+      status_correct = 0.
       total_nonzero = 0.
+      status_nonzero = 0.
+      confusion_matrix = np.zeros([config['data']['num_classes'],config['data']['num_classes']])
       partial_img_rate = np.zeros(10)
       partial_img_rate_counter = 0
       if rank == args.profrank and args.profiler:
@@ -143,21 +148,24 @@ def main():
          tf.profiler.experimental.start(args.logdir)
       for inputs, labels, class_weights in trainds:
          
-         # logger.info('inputs: %s labels: %s class_weights: %s',inputs.shape,labels.shape,class_weights.shape)
          loss_value,pred = train_step(net,loss_func,opt,inputs,labels,first_batch,hvd,config['model']['name'],class_weights)
          tf.summary.experimental.set_step(batch_num + batches_per_epoch * epoch_num)
+
+         class_weights = tf.cast(class_weights,tf.int32)
+         nonzero = tf.math.reduce_sum(class_weights).numpy()
+         status_nonzero += nonzero
 
          first_batch = False
          batch_num += 1
 
-         train_loss_metric += tf.reduce_mean(loss_value)
+         train_loss_metric += tf.reduce_mean(loss_value) * (num_points/nonzero)
 
          pred = tf.cast(tf.argmax(pred,-1,),tf.int32)
-         class_weights = tf.cast(class_weights,tf.int32)
          correct = tf.math.reduce_sum(class_weights * tf.cast(tf.math.equal(pred,labels),tf.int32))
-         total_nonzero += tf.math.reduce_sum(class_weights).numpy()
+
+         confusion_matrix += sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=class_weights.numpy().flatten())
          
-         total_correct += correct.numpy()
+         status_correct += correct.numpy()
          
          if batch_num % status_count == 0:
             img_per_sec = status_count * batch_size * nranks / (time.time() - start)
@@ -171,9 +179,12 @@ def main():
                img_per_sec = np.mean(partial_img_rate[partial_img_rate > 0])
                img_per_sec_std = np.std(partial_img_rate[partial_img_rate > 0])
             loss = train_loss_metric / status_count
-            acc = float(total_correct) / total_nonzero
-            total_correct = 0
-            total_nonzero = 0
+            acc = float(status_correct) / status_nonzero
+            total_correct += status_correct
+            total_nonzero += status_nonzero
+            status_correct = 0
+            status_nonzero = 0
+            train_loss_metric = 0
             logger.info(" [%5d:%5d]: loss = %10.5f acc = %10.5f  imgs/sec = %7.1f +/- %7.1f",
                            epoch_num,batch_num,loss,acc,img_per_sec,img_per_sec_std)
             if rank == 0:
@@ -185,7 +196,6 @@ def main():
                   tf.summary.scalar('img_per_sec',img_per_sec,step=step)
                   tf.summary.scalar('learning_rate',opt._decayed_lr(tf.float32))
             start = time.time()
-            train_loss_metric = 0
                 
          if args.batch_term == batch_num:
             logger.info('terminating batch training after %s batches',batch_num)
@@ -203,43 +213,67 @@ def main():
          ave_img_rate = image_rate_sum / image_rate_n
          std_img_rate = np.sqrt((1/image_rate_n) * image_rate_sum2 - ave_img_rate * ave_img_rate)
          logger.info('batches_per_epoch = %s  Ave Img Rate: %10.5f +/- %10.5f',batches_per_epoch,ave_img_rate,std_img_rate)
+
+         # confustion matrix calc
+         confusion_matrix = confusion_matrix / total_nonzero
+         logger.info('confusion_matrix = \n %s',confusion_matrix)
       
       total_loss = 0.
       total_correct = 0.
       total_nonzero = 0.
+      test_confusion_matrix = 0.
       for test_num,(inputs,labels,class_weights) in enumerate(testds):
          # logger.info('inputs: %s labels: %s class_weights: %s',inputs.shape,labels.shape,class_weights.shape)
-         loss_value,pred = test_step(net,loss_func,inputs,labels)
+         loss_value,pred = test_step(net,loss_func,inputs,labels,class_weights)
          
-         total_loss += tf.reduce_mean(loss_value).numpy()
+         class_weights = tf.cast(class_weights,tf.int32)
+         nonzero = tf.math.reduce_sum(class_weights).numpy()
+         
+         all_loss = tf.reduce_mean(loss_value)
+         if hvd:
+            all_loss = hvd.allreduce(all_loss)
+         
+         total_loss += all_loss * (num_points / nonzero)
 
          pred = tf.cast(tf.argmax(pred,-1,),tf.int32)
-         class_weights = tf.cast(class_weights,tf.int32)
          correct = tf.math.reduce_sum(class_weights * tf.cast(tf.math.equal(pred,labels),tf.int32))
-         total_nonzero += tf.math.reduce_sum(class_weights).numpy()
+         all_correct = correct
+         all_nonzero = nonzero
+         if hvd:
+            all_correct = hvd.allreduce(all_correct,op=hvd.mpi_ops.Sum)
+            all_nonzero = hvd.allreduce(all_nonzero,op=hvd.mpi_ops.Sum)
+         total_nonzero += all_nonzero.numpy()
+         total_correct += all_correct.numpy()
          
-         total_correct += correct.numpy()
-
+         test_confusion_matrix += sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=class_weights.numpy().flatten())
+         
          if test_num > 0 and test_num % status_count == 0:
             test_loss = total_loss / test_num
             test_accuracy = total_correct / total_nonzero
             logger.info(' [%5d:%5d]: test loss = %10.5f  test acc = %10.5f',
                         epoch_num,test_num,test_loss,test_accuracy)
-
       if rank == 0:
+         test_loss = total_loss / test_num
+         test_accuracy = total_correct / total_nonzero
          with test_summary_writer.as_default():
             tf.summary.scalar('loss', test_loss, step=epoch_num * batches_per_epoch + batch_num)
             tf.summary.scalar('accuracy', test_accuracy, step=epoch_num * batches_per_epoch + batch_num)
          ave_img_rate = image_rate_sum / image_rate_n
          std_img_rate = np.sqrt((1/image_rate_n) * image_rate_sum2 - ave_img_rate * ave_img_rate)
-         template = 'Epoch {:10.5f}, Loss: {:10.5f}, Accuracy: {:10.5f}, Test Loss: {:10.5f}, Test Accuracy: {:10.5f} Average Image Rate: {:10.5f} +/- {:10.5f}'
+         template = 'Epoch {:10d}, Loss: {:10.5f}, Accuracy: {:10.5f}, Test Loss: {:10.5f}, Test Accuracy: {:10.5f} Average Image Rate: {:10.5f} +/- {:10.5f}'
          logger.info(template.format(epoch_num + 1,
                                loss,
-                               acc * 100,
+                               acc,
                                test_loss,
-                               test_accuracy * 100,
+                               test_accuracy,
                                ave_img_rate,
                                std_img_rate))
+         test_confusion_matrix = test_confusion_matrix / total_nonzero
+         logger.info('Train Confusion Matrix: \n %s',confusion_matrix)
+         logger.info('Test  Confusion Matrix: \n %s',test_confusion_matrix)
+         json.dump(confusion_matrix.tolist(),open(os.path.join(args.logdir,f'epoch{epoch_num+1:03d}_confustion_matrix_train.json'),'w'))
+         json.dump(test_confusion_matrix.tolist(),open(os.path.join(args.logdir,f'epoch{epoch_num+1:03d}_confustion_matrix_test.json'),'w'))
+         net.save_weights(os.path.join(args.logdir,f'epoch{epoch_num+1:03d}_model_weights.ckpt'))
 
 
 @tf.function
@@ -272,12 +306,12 @@ def train_step(net,loss_func,opt,inputs,labels,first_batch=False,hvd=None,model_
 
 
 @tf.function
-def test_step(net,loss_func,inputs,labels):
+def test_step(net,loss_func,inputs,labels,class_weights):
    # training=False is only needed if there are layers with different
    # behavior during training versus inference (e.g. Dropout).
    pred = net(inputs, training=False)
 
-   loss_value = loss_func(labels, tf.cast(pred,tf.float32))
+   loss_value = loss_func(labels, tf.cast(pred,tf.float32),sample_weight=class_weights)
    # tf.print(tf.math.reduce_sum(inputs),tf.argmax(tf.nn.softmax(predictions,-1),-1),labels,loss_value)
 
    return loss_value,pred
