@@ -293,15 +293,10 @@ class DGCNN(tf.keras.Model):
 
       point_cloud_central = point_cloud
 
-      point_cloud_shape = point_cloud.get_shape()
-      batch_size = point_cloud_shape[0]
-      num_points = point_cloud_shape[1]
-      num_dims = point_cloud_shape[2]
+      idx_ = tf.range(point_cloud.shape[0]) * point_cloud.shape[1]
+      idx_ = tf.reshape(idx_, [point_cloud.shape[0], 1, 1])
 
-      idx_ = tf.range(batch_size) * num_points
-      idx_ = tf.reshape(idx_, [batch_size, 1, 1])
-
-      point_cloud_flat = tf.reshape(point_cloud, [-1, num_dims])
+      point_cloud_flat = tf.reshape(point_cloud, [-1, point_cloud.shape[2]])
       point_cloud_neighbors = tf.gather(point_cloud_flat, nn_idx + idx_)
       point_cloud_central = tf.expand_dims(point_cloud_central, axis=-2)
 
