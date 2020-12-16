@@ -71,7 +71,7 @@ def main():
                        filename=args.logfilename)
    
    if hvd:
-      logging.warning('rank: %5d   size: %5d  local rank: %5d  local size: %5d', 
+      logging.warning('rank: %5d   size: %5d  local rank: %5d  local size: %5d',
                       hvd.rank(), hvd.size(),
                       hvd.local_rank(), hvd.local_size())
    
@@ -139,18 +139,12 @@ def main():
       partial_img_rate = np.zeros(10)
       partial_img_rate_counter = 0
       if rank == args.profrank and args.profiler:
-          logger.info('profiling')
-          tf.profiler.experimental.start(args.logdir)
-      for trainds_entry in trainds:
-         if config['data']['handler'] == 'atlas_pointcloud_csv':
-            inputs, labels, class_weights = trainds_entry
-            #logger.info('inputs: %s labels = %s class_weights = %s',inputs.shape,labels.shape,class_weights.shape)
-         else:
-            inputs,labels = trainds_entry
-            class_weights = None
+         logger.info('profiling')
+         tf.profiler.experimental.start(args.logdir)
+      for inputs, labels, class_weights in trainds:
          
+         # logger.info('inputs: %s labels: %s class_weights: %s',inputs.shape,labels.shape,class_weights.shape)
          loss_value,pred = train_step(net,loss_func,opt,inputs,labels,first_batch,hvd,config['model']['name'],class_weights)
-         #logger.info('loss = %s',loss_value)
          tf.summary.experimental.set_step(batch_num + batches_per_epoch * epoch_num)
 
          first_batch = False
@@ -158,15 +152,12 @@ def main():
 
          train_loss_metric += tf.reduce_mean(loss_value)
 
-         pred = tf.argmax(pred,-1)
-         logger.info('pred %s labels %s',pred,labels)
-         if class_weights is not None:
-            correct = tf.math.reduce_sum(class_weights*tf.math.equal(pred,labels))
-            total_nonzero += tf.math.reduce_sum(class_weights)
-         else:
-            correct = tf.math.reduce_sum(tf.math.equal(pred,labels))
-            total_nonzero += batch_size
-         total_correct += correct
+         pred = tf.cast(tf.argmax(pred,-1,),tf.int32)
+         class_weights = tf.cast(class_weights,tf.int32)
+         correct = tf.math.reduce_sum(class_weights * tf.cast(tf.math.equal(pred,labels),tf.int32))
+         total_nonzero += tf.math.reduce_sum(class_weights).numpy()
+         
+         total_correct += correct.numpy()
          
          if batch_num % status_count == 0:
             img_per_sec = status_count * batch_size * nranks / (time.time() - start)
@@ -177,14 +168,14 @@ def main():
                image_rate_sum2 += img_per_sec * img_per_sec
                partial_img_rate[partial_img_rate_counter % 10] = img_per_sec
                partial_img_rate_counter += 1
-               img_per_sec = np.mean(partial_img_rate[partial_img_rate>0])
-               img_per_sec_std = np.std(partial_img_rate[partial_img_rate>0])
+               img_per_sec = np.mean(partial_img_rate[partial_img_rate > 0])
+               img_per_sec_std = np.std(partial_img_rate[partial_img_rate > 0])
             loss = train_loss_metric / status_count
             acc = float(total_correct) / total_nonzero
             total_correct = 0
             total_nonzero = 0
             logger.info(" [%5d:%5d]: loss = %10.5f acc = %10.5f  imgs/sec = %7.1f +/- %7.1f",
-                           epoch_num,batch_num,loss.numpy(),acc.numpy(),img_per_sec,img_per_sec_std)
+                           epoch_num,batch_num,loss,acc,img_per_sec,img_per_sec_std)
             if rank == 0:
                with train_summary_writer.as_default():
                   step = epoch_num * batches_per_epoch + batch_num
@@ -195,7 +186,6 @@ def main():
                   tf.summary.scalar('learning_rate',opt._decayed_lr(tf.float32))
             start = time.time()
             train_loss_metric = 0
-            
                 
          if args.batch_term == batch_num:
             logger.info('terminating batch training after %s batches',batch_num)
@@ -211,45 +201,35 @@ def main():
       if rank == 0:
          batches_per_epoch = batch_num
          ave_img_rate = image_rate_sum / image_rate_n
-         std_img_rate = np.sqrt((1/image_rate_n) * image_rate_sum2 - ave_img_rate*ave_img_rate)
+         std_img_rate = np.sqrt((1/image_rate_n) * image_rate_sum2 - ave_img_rate * ave_img_rate)
          logger.info('batches_per_epoch = %s  Ave Img Rate: %10.5f +/- %10.5f',batches_per_epoch,ave_img_rate,std_img_rate)
       
       total_loss = 0.
       total_correct = 0.
       total_nonzero = 0.
-      for test_num,testds_entry in enumerate(testds):
-         if config['data']['handler'] == 'atlas_pointcloud_csv':
-            inputs, labels, class_weights = testds_entry
-            #logger.info('inputs: %s labels = %s class_weights = %s',inputs.shape,labels.shape,class_weights.shape)
-         else:
-            inputs,labels = testds_entry
-            class_weights = None
-      
-         loss_value,pred = test_step(net,loss_func,inputs, labels, config['model']['name'])
+      for test_num,(inputs,labels,class_weights) in enumerate(testds):
+         # logger.info('inputs: %s labels: %s class_weights: %s',inputs.shape,labels.shape,class_weights.shape)
+         loss_value,pred = test_step(net,loss_func,inputs,labels)
          
-         total_loss += tf.reduce_mean(loss_value)
+         total_loss += tf.reduce_mean(loss_value).numpy()
 
-         pred = tf.argmax(pred,-1)
-         if class_weights is not None:
-            correct = tf.math.reduce_sum(class_weights * tf.math.equal(pred,labels))
-            total_nonzero += tf.math.reduce_sum(class_weights)
-         else:
-            correct = tf.math.reduce_sum(tf.math.equal(pred,labels))
-            total_nonzero += batch_size
+         pred = tf.cast(tf.argmax(pred,-1,),tf.int32)
+         class_weights = tf.cast(class_weights,tf.int32)
+         correct = tf.math.reduce_sum(class_weights * tf.cast(tf.math.equal(pred,labels),tf.int32))
+         total_nonzero += tf.math.reduce_sum(class_weights).numpy()
+         
+         total_correct += correct.numpy()
 
-         total_correct += correct
-
-
-         if test_num % status_count == 0:
+         if test_num > 0 and test_num % status_count == 0:
             test_loss = total_loss / test_num
             test_accuracy = total_correct / total_nonzero
             logger.info(' [%5d:%5d]: test loss = %10.5f  test acc = %10.5f',
-                         epoch_num,test_num,test_loss,test_accuracy)
+                        epoch_num,test_num,test_loss,test_accuracy)
 
       if rank == 0:
          with test_summary_writer.as_default():
             tf.summary.scalar('loss', test_loss, step=epoch_num * batches_per_epoch + batch_num)
-            tf.summary.scalar('accuracy', test_accuracy[0], step=epoch_num * batches_per_epoch + batch_num)
+            tf.summary.scalar('accuracy', test_accuracy, step=epoch_num * batches_per_epoch + batch_num)
          ave_img_rate = image_rate_sum / image_rate_n
          std_img_rate = np.sqrt((1/image_rate_n) * image_rate_sum2 - ave_img_rate * ave_img_rate)
          template = 'Epoch {:10.5f}, Loss: {:10.5f}, Accuracy: {:10.5f}, Test Loss: {:10.5f}, Test Accuracy: {:10.5f} Average Image Rate: {:10.5f} +/- {:10.5f}'
@@ -257,7 +237,7 @@ def main():
                                loss,
                                acc * 100,
                                test_loss,
-                               test_accuracy[0] * 100,
+                               test_accuracy * 100,
                                ave_img_rate,
                                std_img_rate))
 
@@ -268,7 +248,7 @@ def train_step(net,loss_func,opt,inputs,labels,first_batch=False,hvd=None,model_
    if model_name == 'dgcnn':
       with tf.GradientTape() as tape:
          pred = net(inputs, training=True)
-         loss_value = loss_func(labels, tf.cast(pred,tf.float32),sample_weight=class_weights)
+         loss_value = loss_func(labels, pred,sample_weight=class_weights)
    else:
       with tf.GradientTape() as tape:
          pred = net(inputs, training=True)
@@ -286,28 +266,21 @@ def train_step(net,loss_func,opt,inputs,labels,first_batch=False,hvd=None,model_
    if hvd and first_batch:
       hvd.broadcast_variables(net.variables, root_rank=root_rank)
       hvd.broadcast_variables(opt.variables(), root_rank=root_rank)
-      
-
+   
    # tf.print(tf.argmax(tf.nn.softmax(pred,-1),-1),labels)
-
    return loss_value,pred
 
 
 @tf.function
-def test_step(net,loss_func,inputs,labels,model_name=''):
+def test_step(net,loss_func,inputs,labels):
    # training=False is only needed if there are layers with different
    # behavior during training versus inference (e.g. Dropout).
-   end_points = None
-   if model_name == 'dgcnn':
-      pred,end_points = net(inputs, training=False)
-   else:
-      pred = net(inputs, training=False)
-   #tf.print(pred)
+   pred = net(inputs, training=False)
+
    loss_value = loss_func(labels, tf.cast(pred,tf.float32))
    # tf.print(tf.math.reduce_sum(inputs),tf.argmax(tf.nn.softmax(predictions,-1),-1),labels,loss_value)
 
-   return loss_value,pred,end_points
-
+   return loss_value,pred
 
 
 def get_optimizer(config):
