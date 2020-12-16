@@ -80,7 +80,7 @@ def from_filelist(filelist_filename,config):
    # ds = ds.apply(tf.data.Dataset.unbatch)
 
    # batch the data
-   ds = ds.batch(dc['batch_size'])
+   ds = ds.batch(dc['batch_size'],drop_remainder=True)
 
    return ds
 
