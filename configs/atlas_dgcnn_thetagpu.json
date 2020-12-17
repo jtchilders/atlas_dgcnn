@@ -4,8 +4,7 @@
       "knn":                           20
    },
    "optimizer": {
-      "name":                          "Adam",
-      "learning_rate":                 0.001
+      "name":                          "Adam"
    },
    "lr_schedule": {
       "name":                          "ExponentialDecay",
