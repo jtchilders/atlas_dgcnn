@@ -147,8 +147,9 @@ def main():
          logger.info('profiling')
          tf.profiler.experimental.start(args.logdir)
       for inputs, labels, class_weights in trainds:
-         
+         # logger.info('start train step')
          loss_value,pred = train_step(net,loss_func,opt,inputs,labels,first_batch,hvd,config['model']['name'],class_weights)
+         # logger.info('end train step')
          tf.summary.experimental.set_step(batch_num + batches_per_epoch * epoch_num)
 
          class_weights = tf.cast(class_weights,tf.int32)
@@ -163,7 +164,7 @@ def main():
          pred = tf.cast(tf.argmax(pred,-1,),tf.int32)
          correct = tf.math.reduce_sum(class_weights * tf.cast(tf.math.equal(pred,labels),tf.int32))
 
-         confusion_matrix += sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=class_weights.numpy().flatten())
+         confusion_matrix += sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=class_weights.numpy().flatten(),normalize='true')
          
          status_correct += correct.numpy()
          
@@ -194,7 +195,7 @@ def main():
                   tf.summary.scalar('loss', loss, step=step)
                   tf.summary.scalar('accuracy', acc, step=step)
                   tf.summary.scalar('img_per_sec',img_per_sec,step=step)
-                  tf.summary.scalar('learning_rate',opt._decayed_lr(tf.float32))
+                  tf.summary.scalar('learning_rate',opt.lr(step))
             start = time.time()
                 
          if args.batch_term == batch_num:
@@ -215,13 +216,13 @@ def main():
          logger.info('batches_per_epoch = %s  Ave Img Rate: %10.5f +/- %10.5f',batches_per_epoch,ave_img_rate,std_img_rate)
 
          # confustion matrix calc
-         confusion_matrix = confusion_matrix / total_nonzero
+         confusion_matrix = confusion_matrix / batch_num
          logger.info('confusion_matrix = \n %s',confusion_matrix)
       
       total_loss = 0.
       total_correct = 0.
       total_nonzero = 0.
-      test_confusion_matrix = 0.
+      test_confusion_matrix = np.zeros([config['data']['num_classes'],config['data']['num_classes']])
       for test_num,(inputs,labels,class_weights) in enumerate(testds):
          # logger.info('inputs: %s labels: %s class_weights: %s',inputs.shape,labels.shape,class_weights.shape)
          loss_value,pred = test_step(net,loss_func,inputs,labels,class_weights)
@@ -245,7 +246,14 @@ def main():
          total_nonzero += all_nonzero.numpy()
          total_correct += all_correct.numpy()
          
-         test_confusion_matrix += sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=class_weights.numpy().flatten())
+         all_confusion_matrix = sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=class_weights.numpy().flatten(),normalize='true')
+         
+         if hvd: 
+            all_confusion_matrix = hvd.allreduce(all_confusion_matrix)
+
+         test_confusion_matrix += all_confusion_matrix
+
+         
          
          if test_num > 0 and test_num % status_count == 0:
             test_loss = total_loss / test_num
@@ -268,7 +276,7 @@ def main():
                                test_accuracy,
                                ave_img_rate,
                                std_img_rate))
-         test_confusion_matrix = test_confusion_matrix / total_nonzero
+         test_confusion_matrix = test_confusion_matrix.numpy() / test_num
          logger.info('Train Confusion Matrix: \n %s',confusion_matrix)
          logger.info('Test  Confusion Matrix: \n %s',test_confusion_matrix)
          json.dump(confusion_matrix.tolist(),open(os.path.join(args.logdir,f'epoch{epoch_num+1:03d}_confustion_matrix_train.json'),'w'))
@@ -278,15 +286,11 @@ def main():
 
 @tf.function
 def train_step(net,loss_func,opt,inputs,labels,first_batch=False,hvd=None,model_name='',class_weights=None,root_rank=0):
-
-   if model_name == 'dgcnn':
-      with tf.GradientTape() as tape:
-         pred = net(inputs, training=True)
-         loss_value = loss_func(labels, pred,sample_weight=class_weights)
-   else:
-      with tf.GradientTape() as tape:
-         pred = net(inputs, training=True)
-         loss_value = loss_func(labels, tf.cast(pred,tf.float32))
+   
+   with tf.GradientTape() as tape:
+      pred = net(inputs, training=True)
+      loss_value = loss_func(labels, pred,sample_weight=class_weights)
+   
    if hvd:
       tape = hvd.DistributedGradientTape(tape)
    grads = tape.gradient(loss_value, net.trainable_variables)
@@ -300,8 +304,8 @@ def train_step(net,loss_func,opt,inputs,labels,first_batch=False,hvd=None,model_
    if hvd and first_batch:
       hvd.broadcast_variables(net.variables, root_rank=root_rank)
       hvd.broadcast_variables(opt.variables(), root_rank=root_rank)
-   
-   # tf.print(tf.argmax(tf.nn.softmax(pred,-1),-1),labels)
+
+   # tf.print('exiting train step')
    return loss_value,pred
 
 
@@ -333,15 +337,19 @@ def get_optimizer(config):
             raise Exception('missing args for learning rate schedule %s',lrs_name)
 
    opt_name = config['optimizer']['name']
-   opt_args = config['optimizer'].get('args',None)
+   opt_args = config['optimizer'].get('args',{})
    if hasattr(tf.keras.optimizers, opt_name):
+      logger.info('using optimizer: %s',opt_name)
       if opt_args:
          if lr_schedule:
             opt_args['learning_rate'] = lr_schedule
          logger.info('passing args to optimizer: %s', opt_args)
          return getattr(tf.keras.optimizers, opt_name)(**opt_args)
       else:
-         return getattr(tf.keras.optimizers, opt_name)()
+         if lr_schedule:
+            opt_args['learning_rate'] = lr_schedule
+         logger.info('passing args to optimizer: %s', opt_args)
+         return getattr(tf.keras.optimizers, opt_name)(**opt_args)
    else:
       raise Exception('could not locate optimizer %s',opt_name)
 
