@@ -27,7 +27,7 @@
    "data": {
       "handler":                       "atlas_pointcloud_csv",
       "train_filelist":                "/lus/theta-fs0/projects/atlasMLbjets/parton/csv_data/zej_train.txt",
-      "test_filelist":                 "/lus/theta-fs0/projects/atlasMLbjets/parton/csv_data/zej_val.txt",
+      "test_filelist":                 "/lus/theta-fs0/projects/atlasMLbjets/parton/csv_data/zej_test.txt",
       "batch_size":                    7,
       "shuffle_buffer":                10000,
       "reshuffle_each_iteration":      true,
@@ -39,7 +39,7 @@
       "num_points":                    15000
    },
    "training": {
-      "epochs":                        30,
+      "epochs":                        100,
       "status":                        10
    },
    "validation": {
