@@ -1,10 +1,10 @@
 #!/bin/bash -l
 #COBALT -O logdir/$COBALT_JOBID
-#COBALT -t 180
+#COBALT -t 360
 #COBALT -n 2
 #COBALT -A datascience
 
-MCONDA=/lus/theta-fs0/software/thetagpu/conda/tf_master/2020-11-11/mconda3
+MCONDA=/lus/theta-fs0/software/thetagpu/conda/tf_master/2020-12-17/mconda3
 source $MCONDA/setup.sh
 
 NODES=`cat $COBALT_NODEFILE | wc -l`
@@ -21,7 +21,7 @@ fi
 
 echo EXEC=$EXEC
 echo NODES=$(cat $COBALT_NODEFILE)
-export OMP_NUM_THREADS=16
+export OMP_NUM_THREADS=8
 echo LD_LIBRARY_PATH=$LD_LIBRARY_PATH
 echo PATH=$PATH
 echo which python = $(which python)

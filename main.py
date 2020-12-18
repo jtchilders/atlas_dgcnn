@@ -33,6 +33,8 @@ def main():
 
    parser.add_argument('--batch-term',dest='batch_term',type=int,help='if set, terminates training after the specified number of batches',default=0)
 
+   parser.add_argument('--evaluate',help='evaluate a pre-trained model file on the test data set only.')
+
    parser.add_argument('--debug', dest='debug', default=False, action='store_true', help="Set Logger to DEBUG")
    parser.add_argument('--error', dest='error', default=False, action='store_true', help="Set Logger to ERROR")
    parser.add_argument('--warning', dest='warning', default=False, action='store_true', help="Set Logger to ERROR")
@@ -101,20 +103,39 @@ def main():
    config = json.load(open(args.config_filename))
    # config['device'] = device_str
    
+   config['rank'] = rank
+   config['nranks'] = nranks
+   config['evaluate'] = False
+   config['batch_term'] = args.batch_term
+   if args.batch_term > 0:
+      config['training']['epochs'] = 1
+
+   if args.evaluate is not None:
+      config['evaluate'] = True
+      config['model_file'] = args.evaluate
+      config['training']['epochs'] = 1
+      logger.info('evaluating model file:      %s',args.evaluate)
+   
    logger.info('-=-=-=-=-=-=-=-=-  CONFIG FILE -=-=-=-=-=-=-=-=-')
    logger.info('%s = \n %s',args.config_filename,json.dumps(config,indent=4,sort_keys=True))
    logger.info('-=-=-=-=-=-=-=-=-  CONFIG FILE -=-=-=-=-=-=-=-=-')
    config['hvd'] = hvd
+
 
    trainds,testds = data_handler.get_datasets(config)
    
    logger.info('get model')
    net = model.get_model(config)
 
+   if args.evaluate:
+      net.load_weights(args.evaluate)
+
    loss_func = losses.get_loss(config)
 
    opt = get_optimizer(config)
 
+   train_summary_writer = None
+   test_summary_writer = None
    if rank == 0:
       train_summary_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'train')
       test_summary_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'test')
@@ -125,167 +146,203 @@ def main():
    status_count = config['training']['status']
    batch_size = config['data']['batch_size']
    num_points = config['data']['num_points']
+   num_classes = config['data']['num_classes']
    for epoch_num in range(config['training']['epochs']):
       
-      train_loss_metric = 0
-
       logger.info('begin epoch %s',epoch_num)
 
-      batch_num = 0
-      start = time.time()
-      image_rate_sum = 0.
-      image_rate_sum2 = 0.
-      image_rate_n = 0.
-      total_correct = 0.
-      status_correct = 0.
-      total_nonzero = 0.
-      status_nonzero = 0.
-      confusion_matrix = np.zeros([config['data']['num_classes'],config['data']['num_classes']])
-      partial_img_rate = np.zeros(10)
-      partial_img_rate_counter = 0
-      if rank == args.profrank and args.profiler:
-         logger.info('profiling')
-         tf.profiler.experimental.start(args.logdir)
-      for inputs, labels, class_weights in trainds:
-         # logger.info('start train step')
-         loss_value,pred = train_step(net,loss_func,opt,inputs,labels,first_batch,hvd,config['model']['name'],class_weights)
-         # logger.info('end train step')
-         tf.summary.experimental.set_step(batch_num + batches_per_epoch * epoch_num)
-
-         class_weights = tf.cast(class_weights,tf.int32)
-         nonzero = tf.math.reduce_sum(class_weights).numpy()
-         status_nonzero += nonzero
-
-         first_batch = False
-         batch_num += 1
-
-         train_loss_metric += tf.reduce_mean(loss_value) * (num_points/nonzero)
-
-         pred = tf.cast(tf.argmax(pred,-1,),tf.int32)
-         correct = tf.math.reduce_sum(class_weights * tf.cast(tf.math.equal(pred,labels),tf.int32))
-
-         confusion_matrix += sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=class_weights.numpy().flatten(),normalize='true')
-         
-         status_correct += correct.numpy()
-         
-         if batch_num % status_count == 0:
-            img_per_sec = status_count * batch_size * nranks / (time.time() - start)
-            img_per_sec_std = 0
-            if batch_num > 10:
-               image_rate_n += 1
-               image_rate_sum += img_per_sec
-               image_rate_sum2 += img_per_sec * img_per_sec
-               partial_img_rate[partial_img_rate_counter % 10] = img_per_sec
-               partial_img_rate_counter += 1
-               img_per_sec = np.mean(partial_img_rate[partial_img_rate > 0])
-               img_per_sec_std = np.std(partial_img_rate[partial_img_rate > 0])
-            loss = train_loss_metric / status_count
-            acc = float(status_correct) / status_nonzero
-            total_correct += status_correct
-            total_nonzero += status_nonzero
-            status_correct = 0
-            status_nonzero = 0
-            train_loss_metric = 0
-            logger.info(" [%5d:%5d]: loss = %10.5f acc = %10.5f  imgs/sec = %7.1f +/- %7.1f",
-                           epoch_num,batch_num,loss,acc,img_per_sec,img_per_sec_std)
-            if rank == 0:
-               with train_summary_writer.as_default():
-                  step = epoch_num * batches_per_epoch + batch_num
-                  tf.summary.experimental.set_step(step)
-                  tf.summary.scalar('loss', loss, step=step)
-                  tf.summary.scalar('accuracy', acc, step=step)
-                  tf.summary.scalar('img_per_sec',img_per_sec,step=step)
-                  tf.summary.scalar('learning_rate',opt.lr(step))
-            start = time.time()
-                
-         if args.batch_term == batch_num:
-            logger.info('terminating batch training after %s batches',batch_num)
-            if rank == args.profrank and args.profiler:
-               logger.info('stop profiling')
-               tf.profiler.experimental.stop()
-            exit = True
-            break
-         # for testing
-         # if batch_num == 20: break
-      if exit:
-         break
-      if rank == 0:
-         batches_per_epoch = batch_num
-         ave_img_rate = image_rate_sum / image_rate_n
-         std_img_rate = np.sqrt((1/image_rate_n) * image_rate_sum2 - ave_img_rate * ave_img_rate)
-         logger.info('batches_per_epoch = %s  Ave Img Rate: %10.5f +/- %10.5f',batches_per_epoch,ave_img_rate,std_img_rate)
-
-         # confustion matrix calc
-         confusion_matrix = confusion_matrix / batch_num
-         logger.info('confusion_matrix = \n %s',confusion_matrix)
+      loss = 0.
+      acc = 0.
+      confusion_matrix = None
+      batch_num = 0.
+      if not config['evaluate']:
+         loss,acc,confusion_matrix,batch_num = train_one_epoch(config,trainds,net,
+                                 loss_func,opt,epoch_num,train_summary_writer,
+                                 args.profiler,args.profrank,args.logdir)
       
       total_loss = 0.
       total_correct = 0.
       total_nonzero = 0.
-      test_confusion_matrix = np.zeros([config['data']['num_classes'],config['data']['num_classes']])
-      for test_num,(inputs,labels,class_weights) in enumerate(testds):
+      test_confusion_matrix = np.zeros([num_classes,num_classes])
+      test_num = 0.
+      total_iou = np.zeros(num_classes)
+      for inputs,labels,class_weights in testds:
          # logger.info('inputs: %s labels: %s class_weights: %s',inputs.shape,labels.shape,class_weights.shape)
          loss_value,pred = test_step(net,loss_func,inputs,labels,class_weights)
          
          class_weights = tf.cast(class_weights,tf.int32)
          nonzero = tf.math.reduce_sum(class_weights).numpy()
          
-         all_loss = tf.reduce_mean(loss_value)
+         all_loss = tf.reduce_mean(loss_value) * (num_points / nonzero)
          if hvd:
             all_loss = hvd.allreduce(all_loss)
          
-         total_loss += all_loss * (num_points / nonzero)
+         total_loss += all_loss
 
          pred = tf.cast(tf.argmax(pred,-1,),tf.int32)
          correct = tf.math.reduce_sum(class_weights * tf.cast(tf.math.equal(pred,labels),tf.int32))
          all_correct = correct
          all_nonzero = nonzero
+         all_iou = get_iou(labels,pred,num_classes)
          if hvd:
             all_correct = hvd.allreduce(all_correct,op=hvd.mpi_ops.Sum)
             all_nonzero = hvd.allreduce(all_nonzero,op=hvd.mpi_ops.Sum)
+            all_iou = hvd.allreduce(all_iou)
          total_nonzero += all_nonzero.numpy()
          total_correct += all_correct.numpy()
+         total_iou += all_iou.numpy()
          
          all_confusion_matrix = sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=class_weights.numpy().flatten(),normalize='true')
-         
-         if hvd: 
+         if hvd:
             all_confusion_matrix = hvd.allreduce(all_confusion_matrix)
 
          test_confusion_matrix += all_confusion_matrix
 
-         
-         
          if test_num > 0 and test_num % status_count == 0:
             test_loss = total_loss / test_num
             test_accuracy = total_correct / total_nonzero
             logger.info(' [%5d:%5d]: test loss = %10.5f  test acc = %10.5f',
                         epoch_num,test_num,test_loss,test_accuracy)
+         test_num += 1
+
       if rank == 0:
          test_loss = total_loss / test_num
          test_accuracy = total_correct / total_nonzero
-         with test_summary_writer.as_default():
-            tf.summary.scalar('loss', test_loss, step=epoch_num * batches_per_epoch + batch_num)
-            tf.summary.scalar('accuracy', test_accuracy, step=epoch_num * batches_per_epoch + batch_num)
-         ave_img_rate = image_rate_sum / image_rate_n
-         std_img_rate = np.sqrt((1/image_rate_n) * image_rate_sum2 - ave_img_rate * ave_img_rate)
-         template = 'Epoch {:10d}, Loss: {:10.5f}, Accuracy: {:10.5f}, Test Loss: {:10.5f}, Test Accuracy: {:10.5f} Average Image Rate: {:10.5f} +/- {:10.5f}'
+         test_iou = total_iou / test_num
+         template = 'Epoch {:10d}, Loss: {:10.5f}, Accuracy: {:10.5f}, Test Loss: {:10.5f}, Test Accuracy: {:10.5f}'
          logger.info(template.format(epoch_num + 1,
                                loss,
                                acc,
                                test_loss,
-                               test_accuracy,
-                               ave_img_rate,
-                               std_img_rate))
+                               test_accuracy))
+         
+         with test_summary_writer.as_default():
+            step = epoch_num * batches_per_epoch + batch_num
+            if step == 0:
+               step = 1
+            tf.summary.scalar('loss', test_loss, step=step)
+            tf.summary.scalar('accuracy', test_accuracy, step=step)
+         
          test_confusion_matrix = test_confusion_matrix.numpy() / test_num
          logger.info('Train Confusion Matrix: \n %s',confusion_matrix)
          logger.info('Test  Confusion Matrix: \n %s',test_confusion_matrix)
-         json.dump(confusion_matrix.tolist(),open(os.path.join(args.logdir,f'epoch{epoch_num+1:03d}_confustion_matrix_train.json'),'w'))
+         logger.info('Test IOU: %s',test_iou)
+         if confusion_matrix is not None:
+            json.dump(confusion_matrix.tolist(),open(os.path.join(args.logdir,f'epoch{epoch_num+1:03d}_confustion_matrix_train.json'),'w'))
          json.dump(test_confusion_matrix.tolist(),open(os.path.join(args.logdir,f'epoch{epoch_num+1:03d}_confustion_matrix_test.json'),'w'))
          net.save_weights(os.path.join(args.logdir,f'epoch{epoch_num+1:03d}_model_weights.ckpt'))
 
 
+def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,profiler=None,profrank=0,logdir=None):
+
+   first_batch = True
+   batches_per_epoch = 0
+   status_count   = config['training']['status']
+   batch_size     = config['data']['batch_size']
+   num_points     = config['data']['num_points']
+   num_classes    = config['data']['num_classes']
+   rank           = config['rank']
+   batch_num      = 0
+   start          = time.time()
+   train_loss_metric = 0
+
+   # used for ongoing image rate calculation
+   image_rate_sum = 0.
+   image_rate_sum2 = 0.
+   image_rate_n = 0.
+
+   # used for accuracy (status_ gets zeroed periodically)
+   total_correct = 0.
+   status_correct = 0.
+   total_nonzero = 0.
+   status_nonzero = 0.
+
+   # track confusion matrix
+   confusion_matrix = np.zeros([num_classes,num_classes])
+
+   partial_img_rate = np.zeros(10)
+   partial_img_rate_counter = 0
+   
+   # run Tensorflow Profiling for some number of loops
+   if rank == profrank and profiler:
+      logger.info('profiling')
+      tf.profiler.experimental.start(logdir)
+
+   for inputs, labels, class_weights in dataset:
+      # logger.info('start train step')
+      loss_value,pred = train_step(net,loss_func,opt,inputs,labels,first_batch,config['hvd'],class_weights)
+      # logger.info('end train step')
+      tf.summary.experimental.set_step(batch_num + batches_per_epoch * epoch_num)
+
+      class_weights = tf.cast(class_weights,tf.int32)
+      nonzero = tf.math.reduce_sum(class_weights).numpy()
+      status_nonzero += nonzero
+
+      first_batch = False
+      batch_num += 1
+
+      train_loss_metric += tf.reduce_mean(loss_value) * (num_points / nonzero)
+
+      pred = tf.cast(tf.argmax(pred,-1,),tf.int32)
+      correct = tf.math.reduce_sum(class_weights * tf.cast(tf.math.equal(pred,labels),tf.int32))
+
+      confusion_matrix += sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=class_weights.numpy().flatten(),normalize='true')
+      
+      status_correct += correct.numpy()
+      
+      if batch_num % status_count == 0:
+         img_per_sec = status_count * batch_size * config['nranks'] / (time.time() - start)
+         img_per_sec_std = 0
+         if batch_num > 10:
+            image_rate_n += 1
+            image_rate_sum += img_per_sec
+            image_rate_sum2 += img_per_sec * img_per_sec
+            partial_img_rate[partial_img_rate_counter % 10] = img_per_sec
+            partial_img_rate_counter += 1
+            img_per_sec = np.mean(partial_img_rate[partial_img_rate > 0])
+            img_per_sec_std = np.std(partial_img_rate[partial_img_rate > 0])
+         loss = train_loss_metric / status_count
+         acc = float(status_correct) / status_nonzero
+         total_correct += status_correct
+         total_nonzero += status_nonzero
+         status_correct = 0
+         status_nonzero = 0
+         train_loss_metric = 0
+         logger.info(" [%5d:%5d]: loss = %10.5f acc = %10.5f  imgs/sec = %7.1f +/- %7.1f",
+                        epoch_num,batch_num,loss,acc,img_per_sec,img_per_sec_std)
+         if rank == 0:
+            with tbwriter.as_default():
+               step = epoch_num * batches_per_epoch + batch_num
+               tf.summary.experimental.set_step(step)
+               tf.summary.scalar('loss', loss, step=step)
+               tf.summary.scalar('accuracy', acc, step=step)
+               tf.summary.scalar('img_per_sec',img_per_sec,step=step)
+               tf.summary.scalar('learning_rate',opt.lr(step))
+         start = time.time()
+             
+      if config['batch_term'] == batch_num:
+         logger.info('terminating batch training after %s batches',batch_num)
+         if config['rank'] == profrank and profiler:
+            logger.info('stop profiling')
+            tf.profiler.experimental.stop()
+         break
+      # for testing
+      if batch_num == 20: break
+   if rank == 0:
+      batches_per_epoch = batch_num
+      ave_img_rate = image_rate_sum / image_rate_n
+      std_img_rate = np.sqrt((1 / image_rate_n) * image_rate_sum2 - ave_img_rate * ave_img_rate)
+      logger.info('batches_per_epoch = %s  Ave Img Rate: %10.5f +/- %10.5f',batches_per_epoch,ave_img_rate,std_img_rate)
+
+      # confustion matrix calc
+      confusion_matrix = confusion_matrix / batch_num
+      logger.info('confusion_matrix = \n %s',confusion_matrix)
+   
+   return loss,acc,confusion_matrix,batch_num
+
+
 @tf.function
-def train_step(net,loss_func,opt,inputs,labels,first_batch=False,hvd=None,model_name='',class_weights=None,root_rank=0):
+def train_step(net,loss_func,opt,inputs,labels,first_batch=False,hvd=None,class_weights=None,root_rank=0):
    
    with tf.GradientTape() as tape:
       pred = net(inputs, training=True)
@@ -353,6 +410,23 @@ def get_optimizer(config):
    else:
       raise Exception('could not locate optimizer %s',opt_name)
 
+
+def get_iou(truth,pred,num_classes):
+
+   iou = np.zeros(num_classes)
+   for i in range(num_classes):
+      truth_classes = tf.math.equal(truth,i)
+      pred_classes  = tf.math.equal(pred,i)
+      
+      intersection = tf.cast(tf.math.logical_and(truth_classes,pred_classes),tf.int32)
+      intersection = tf.math.reduce_sum(intersection)
+
+      union = tf.cast(tf.math.logical_or(truth_classes,pred_classes),tf.int32)
+      union = tf.math.reduce_sum(union)
+
+      iou[i] = intersection / union
+
+   return iou
 
 if __name__ == "__main__":
    main()

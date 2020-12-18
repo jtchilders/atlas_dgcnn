@@ -49,11 +49,14 @@ def from_filelist(filelist_filename,config):
          filelist.append(line.strip())
 
    # estimate batches per MPI rank
-   batches_per_rank = int(len(filelist) / dc['batch_size'] / numranks)
+   total_batches = int(len(filelist) / dc['batch_size'])
+   batches_per_rank = int(total_batches / numranks)
+   total_even_batches = batches_per_rank * numranks
+   total_events = total_even_batches * dc['batch_size']
    logger.info(f'input filelist contains {len(filelist)} files, estimated batches per rank {batches_per_rank}')
    
    # glob for the input files
-   filelist = tf.data.Dataset.from_tensor_slices(filelist)
+   filelist = tf.data.Dataset.from_tensor_slices(filelist[0:total_events])
    
    # shard the data
    if config['hvd']:
