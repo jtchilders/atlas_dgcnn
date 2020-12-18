@@ -1,8 +1,8 @@
 import logging
 logger = logging.getLogger('model')
 
-__all__ = ['mnist','resnet','dgcnn']
-from . import mnist,resnet,dgcnn
+__all__ = ['dgcnn']
+from . import dgcnn
 
 
 def get_model(config):
