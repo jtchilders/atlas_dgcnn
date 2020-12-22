@@ -139,6 +139,10 @@ def main():
    if rank == 0:
       train_summary_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'train')
       test_summary_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'test')
+      
+      test_jet_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'jet_iou')
+      test_ele_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'ele_iou')
+      test_bkg_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'bkg_iou')
 
    first_batch = True
    batches_per_epoch = 0
@@ -156,8 +160,9 @@ def main():
       confusion_matrix = None
       batch_num = 0.
       if not config['evaluate']:
-         loss,acc,confusion_matrix,batch_num = train_one_epoch(config,trainds,net,
+         loss,acc,confusion_matrix,batch_num,batches_per_epoch = train_one_epoch(config,trainds,net,
                                  loss_func,opt,epoch_num,train_summary_writer,
+                                 batches_per_epoch,
                                  args.profiler,args.profrank,args.logdir)
       
       total_loss = 0.
@@ -166,12 +171,12 @@ def main():
       test_confusion_matrix = np.zeros([num_classes,num_classes])
       test_num = 0.
       total_iou = np.zeros(num_classes)
-      for inputs,labels,class_weights in testds:
+      for inputs,labels,class_weights,nonzero_mask in testds:
          # logger.info('inputs: %s labels: %s class_weights: %s',inputs.shape,labels.shape,class_weights.shape)
-         loss_value,pred = test_step(net,loss_func,inputs,labels,class_weights)
+         loss_value,pred = test_step(net,loss_func,inputs,labels,nonzero_mask)
          
-         class_weights = tf.cast(class_weights,tf.int32)
-         nonzero = tf.math.reduce_sum(class_weights).numpy()
+         nonzero_mask = tf.cast(nonzero_mask,tf.int32)
+         nonzero = tf.math.reduce_sum(nonzero_mask).numpy()
          
          all_loss = tf.reduce_mean(loss_value) * (num_points / nonzero)
          if hvd:
@@ -180,10 +185,11 @@ def main():
          total_loss += all_loss
 
          pred = tf.cast(tf.argmax(pred,-1,),tf.int32)
-         correct = tf.math.reduce_sum(class_weights * tf.cast(tf.math.equal(pred,labels),tf.int32))
+         correct = tf.math.reduce_sum(nonzero_mask * tf.cast(tf.math.equal(pred,labels),tf.int32))
          all_correct = correct
          all_nonzero = nonzero
-         all_iou = get_iou(labels,pred,num_classes)
+         all_iou = get_iou(labels,pred,num_classes,nonzero_mask)
+         all_iou[np.isnan(all_iou)] = 0.
          if hvd:
             all_correct = hvd.allreduce(all_correct,op=hvd.mpi_ops.Sum)
             all_nonzero = hvd.allreduce(all_nonzero,op=hvd.mpi_ops.Sum)
@@ -192,7 +198,7 @@ def main():
          total_correct += all_correct.numpy()
          total_iou += all_iou.numpy()
          
-         all_confusion_matrix = sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=class_weights.numpy().flatten(),normalize='true')
+         all_confusion_matrix = sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=nonzero_mask.numpy().flatten(),normalize='true')
          if hvd:
             all_confusion_matrix = hvd.allreduce(all_confusion_matrix)
 
@@ -220,8 +226,14 @@ def main():
             step = epoch_num * batches_per_epoch + batch_num
             if step == 0:
                step = 1
-            tf.summary.scalar('loss', test_loss, step=step)
-            tf.summary.scalar('accuracy', test_accuracy, step=step)
+            tf.summary.scalar('metrics/loss', test_loss, step=step)
+            tf.summary.scalar('metrics/accuracy', test_accuracy, step=step)
+         with test_jet_writer.as_default():
+            tf.summary.scalar('metrics/iou',test_iou[0],step=step)
+         with test_ele_writer.as_default():
+            tf.summary.scalar('metrics/iou',test_iou[1],step=step)
+         with test_bkg_writer.as_default():
+            tf.summary.scalar('metrics/iou',test_iou[2],step=step)
          
          test_confusion_matrix = test_confusion_matrix.numpy() / test_num
          logger.info('Train Confusion Matrix: \n %s',confusion_matrix)
@@ -233,10 +245,10 @@ def main():
          net.save_weights(os.path.join(args.logdir,f'epoch{epoch_num+1:03d}_model_weights.ckpt'))
 
 
-def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,profiler=None,profrank=0,logdir=None):
+def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,
+                    batches_per_epoch,profiler=None,profrank=0,logdir=None):
 
    first_batch = True
-   batches_per_epoch = 0
    status_count   = config['training']['status']
    batch_size     = config['data']['batch_size']
    num_points     = config['data']['num_points']
@@ -268,7 +280,7 @@ def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,profiler
       logger.info('profiling')
       tf.profiler.experimental.start(logdir)
 
-   for inputs, labels, class_weights in dataset:
+   for inputs, labels, class_weights, nonzero_mask in dataset:
       # logger.info('start train step')
       loss_value,pred = train_step(net,loss_func,opt,inputs,labels,first_batch,config['hvd'],class_weights)
       # logger.info('end train step')
@@ -314,10 +326,10 @@ def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,profiler
             with tbwriter.as_default():
                step = epoch_num * batches_per_epoch + batch_num
                tf.summary.experimental.set_step(step)
-               tf.summary.scalar('loss', loss, step=step)
-               tf.summary.scalar('accuracy', acc, step=step)
-               tf.summary.scalar('img_per_sec',img_per_sec,step=step)
-               tf.summary.scalar('learning_rate',opt.lr(step))
+               tf.summary.scalar('metrics/loss', loss, step=step)
+               tf.summary.scalar('metrics/accuracy', acc, step=step)
+               tf.summary.scalar('monitors/img_per_sec',img_per_sec,step=step)
+               tf.summary.scalar('monitors/learning_rate',opt.lr(step))
          start = time.time()
              
       if config['batch_term'] == batch_num:
@@ -327,7 +339,7 @@ def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,profiler
             tf.profiler.experimental.stop()
          break
       # for testing
-      if batch_num == 20: break
+      # if batch_num == 1: break
    if rank == 0:
       batches_per_epoch = batch_num
       ave_img_rate = image_rate_sum / image_rate_n
@@ -338,7 +350,7 @@ def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,profiler
       confusion_matrix = confusion_matrix / batch_num
       logger.info('confusion_matrix = \n %s',confusion_matrix)
    
-   return loss,acc,confusion_matrix,batch_num
+   return loss,acc,confusion_matrix,batch_num,batches_per_epoch
 
 
 @tf.function
@@ -411,21 +423,19 @@ def get_optimizer(config):
       raise Exception('could not locate optimizer %s',opt_name)
 
 
-def get_iou(truth,pred,num_classes):
+def get_iou(truth,pred,num_classes,mask):
 
    iou = np.zeros(num_classes)
    for i in range(num_classes):
       truth_classes = tf.math.equal(truth,i)
       pred_classes  = tf.math.equal(pred,i)
       
-      intersection = tf.cast(tf.math.logical_and(truth_classes,pred_classes),tf.int32)
+      intersection = tf.cast(tf.math.logical_and(truth_classes,pred_classes),tf.int32) * mask
       intersection = tf.math.reduce_sum(intersection)
 
-      union = tf.cast(tf.math.logical_or(truth_classes,pred_classes),tf.int32)
+      union = tf.cast(tf.math.logical_or(truth_classes,pred_classes),tf.int32) * mask
       union = tf.math.reduce_sum(union)
-
       iou[i] = intersection / union
-
    return iou
 
 if __name__ == "__main__":
