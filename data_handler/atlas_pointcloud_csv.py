@@ -35,7 +35,6 @@ def get_datasets(config):
 
 def from_filelist(filelist_filename,config):
    logger.debug(f'build dataset {filelist_filename}')
-
    dc = config['data']
 
    numranks = 1
@@ -89,7 +88,7 @@ def from_filelist(filelist_filename,config):
 
 
 def load_csv_file(filename):
-   return tf.py_function(load_csv_file_py,[filename],[tf.float32,tf.int32,tf.int8])
+   return tf.py_function(load_csv_file_py,[filename],[tf.float32,tf.int32,tf.int8,tf.int8])
 
 
 def load_csv_file_py(filename):
@@ -97,50 +96,63 @@ def load_csv_file_py(filename):
 
    df = pd.read_csv(filename,header=None,names=col_names, dtype=col_dtype, sep='\t')
 
+   # clip the number of points from the input based on the config num_points
+   if len(df) > gnum_points:
+      df = df[0:gnum_points]
+
    # build the model inputs
    df_inputs = df[include_cols].to_numpy()
+   # logger.info('1 df_inputs: %s',df_inputs.shape)
    # normalize variables
    scaler = MinMaxScaler()
    df_inputs = scaler.fit_transform(df_inputs)
+   # logger.info('2 df_inputs: %s',df_inputs.shape)
    # tf.print('df_inputs: ',df_inputs[0:10,...])
 
    # stuff ragged event sizes into fixed size
    inputs = np.zeros([gnum_points,gnum_features])
-   df_inputs_num_points = np.min([df_inputs.shape[0],gnum_points])
-   inputs[0:df_inputs_num_points,...] = df_inputs[0:df_inputs_num_points,...]
+   # logger.info('3 inputs: %s',inputs.shape)
+   inputs[0:df_inputs.shape[0],...] = df_inputs[0:df_inputs.shape[0],...]
 
    # build the labels
    df_labels = df[['pid']]
    # map pid to class label
    df_labels = df_labels.replace({'pid':labels_dict})
+   # logger.info('5 df_labels: %s %s',df_labels.shape,np.unique(df_labels,return_counts=True))
 
    # convert to numpy
    df_labels = df_labels.to_numpy()
    df_labels = np.squeeze(df_labels,-1)
-   # tf.print('df_labels: ',df_labels.shape)
-
-   # pad with zeros or clip some points
-   labels = np.zeros([gconfig['data']['num_points']])
-   df_labels_num_points = np.min([df_labels.shape[0],gnum_points])
-   labels[0:df_labels_num_points] = df_labels[0:df_labels_num_points]
 
    # count number of each class
    # use the lowest to decide weights for loss function
    # get list of unique classes and their occurance count
-   unique_classes,unique_counts = np.unique(labels,return_counts=True)
+   unique_classes,unique_counts = np.unique(df_labels,return_counts=True)
    # get mininum class occurance count
    min_class_count = np.min(unique_counts)
+   # logger.info('66 min_class_count: %s',min_class_count)
    # tf.print('min_class_count:',min_class_count,unique_classes,unique_counts)
    # create class weights to be applied to loss as mask
    # this will balance the loss function across classes
-   class_weights = np.zeros([gconfig['data']['num_points']],dtype=np.int8)
+   class_weights = np.zeros([gnum_points],dtype=np.int8)
    # set weights to one for an equal number of classes
    for class_label in unique_classes:
       # tf.print('class_label:',class_label)
-      class_indices = np.nonzero(labels == class_label)[0]
+      class_indices = np.nonzero(df_labels == class_label)[0]
+      # logger.info('class_indices: %s %s',class_label,df_labels[class_indices])
       class_indices = np.random.choice(class_indices,size=[min_class_count],replace=False)
       class_weights[class_indices] = 1
       # tf.print('3: ',np.unique(class_weights,return_counts=True))
+   
+   # logger.info('7 class_weights: %s %s %s',class_weights.shape,class_weights.sum(),1)
+
+   nonzero_mask = np.zeros([gnum_points],dtype=np.int8)
+   nonzero_mask[0:df_labels.shape[0]] = 1
+   # logger.info('8 nonzero_mask: %s %s',nonzero_mask.shape,nonzero_mask.sum())
+
+   # pad with zeros or clip some points
+   labels = np.zeros([gconfig['data']['num_points']])
+   labels[0:df_labels.shape[0]] = df_labels[0:df_labels.shape[0]]
 
    # return inputs and labels
-   return inputs,labels,class_weights
+   return inputs,labels,class_weights,nonzero_mask
