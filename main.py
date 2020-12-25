@@ -4,6 +4,7 @@ os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '3'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import numpy as np
 import tensorflow as tf
+import tensorflow_addons as tfa
 #from tensorflow.python.client import device_lib
 from tensorflow.keras.mixed_precision import experimental as mixed_precision
 import data_handler
@@ -281,15 +282,16 @@ def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,
       tf.profiler.experimental.start(logdir)
 
    for inputs, labels, class_weights, nonzero_mask in dataset:
-      # logger.info('start train step')
+      # logger.error('%03d start train step',batch_num)
       loss_value,pred = train_step(net,loss_func,opt,inputs,labels,first_batch,config['hvd'],class_weights)
-      # logger.info('end train step')
+      # logger.error('%03d start train step',batch_num)
       tf.summary.experimental.set_step(batch_num + batches_per_epoch * epoch_num)
 
       class_weights = tf.cast(class_weights,tf.int32)
       nonzero = tf.math.reduce_sum(class_weights).numpy()
       status_nonzero += nonzero
 
+      # logger.error('%03d after nonzero',batch_num)
       first_batch = False
       batch_num += 1
 
@@ -302,6 +304,7 @@ def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,
       
       status_correct += correct.numpy()
       
+      # logger.error('%03d run status',batch_num)
       if batch_num % status_count == 0:
          img_per_sec = status_count * batch_size * config['nranks'] / (time.time() - start)
          img_per_sec_std = 0
@@ -331,6 +334,7 @@ def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,
                tf.summary.scalar('monitors/img_per_sec',img_per_sec,step=step)
                tf.summary.scalar('monitors/learning_rate',opt.lr(step))
          start = time.time()
+      # logger.error('%03d after status',batch_num)
              
       if config['batch_term'] == batch_num:
          logger.info('terminating batch training after %s batches',batch_num)
@@ -339,6 +343,8 @@ def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,
             tf.profiler.experimental.stop()
          break
       # for testing
+      # logger.error('%03d end of loop',batch_num)
+   # logger.error('exited loop')
       # if batch_num == 1: break
    if rank == 0:
       batches_per_epoch = batch_num
@@ -357,13 +363,17 @@ def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,
 def train_step(net,loss_func,opt,inputs,labels,first_batch=False,hvd=None,class_weights=None,root_rank=0):
    
    with tf.GradientTape() as tape:
+      # tf.print(':%05d: in gradtape' % hvd.rank())
       pred = net(inputs, training=True)
+      # tf.print(':%05d: got pred' % hvd.rank())
       loss_value = loss_func(labels, pred,sample_weight=class_weights)
+      # tf.print(':%05d: got loss' % hvd.rank())
    
    if hvd:
       tape = hvd.DistributedGradientTape(tape)
    grads = tape.gradient(loss_value, net.trainable_variables)
    opt.apply_gradients(zip(grads, net.trainable_variables))
+   # tf.print(':%05d: applied grads' % hvd.rank())
    # Horovod: broadcast initial variable states from rank 0 to all other processes.
    # This is necessary to ensure consistent initialization of all workers when
    # training is started with random weights or restored from a checkpoint.
@@ -373,8 +383,8 @@ def train_step(net,loss_func,opt,inputs,labels,first_batch=False,hvd=None,class_
    if hvd and first_batch:
       hvd.broadcast_variables(net.variables, root_rank=root_rank)
       hvd.broadcast_variables(opt.variables(), root_rank=root_rank)
+   # tf.print(':%05d: exiting train step' % hvd.rank())
 
-   # tf.print('exiting train step')
    return loss_value,pred
 
 
@@ -404,6 +414,23 @@ def get_optimizer(config):
             lr_schedule = lr_schedule(**lrs_args)
          else:
             raise Exception('missing args for learning rate schedule %s',lrs_name)
+      elif lrs_name in globals():
+         logger.info('using learning rate schedule %s', lrs_name)
+         lr_schedule = globals()[lrs_name]
+         if lrs_args:
+            lr_schedule = lr_schedule(**lrs_args)
+         else:
+            raise Exception('missing args for learning rate schedule %s',lrs_name)
+      elif hasattr(tfa.optimizers,lrs_name):
+         logger.info('using learning rate schedule %s', lrs_name)
+         lr_schedule = getattr(tfa.optimizers, lrs_name)
+         if lrs_args:
+            lr_schedule = lr_schedule(**lrs_args)
+         else:
+            raise Exception('missing args for learning rate schedule %s',lrs_name)
+      else:
+         raise Exception('failed to find lr_schedule: %s' % lrs_name)
+
 
    opt_name = config['optimizer']['name']
    opt_args = config['optimizer'].get('args',{})
