@@ -11,43 +11,69 @@ class InputTransformNet(tf.keras.Model):
    """ Input (XYZ) Transform Net, input is BxNx3 gray image
     Return:
       Transformation matrix of size 3xK """
-   def __init__(self,config,nfeatures):
+   def __init__(self,config,nfeatures,use_kernel_reg=False):
       super(InputTransformNet,self).__init__()
       self.batch_size = config['data']['batch_size']
       self.num_points = config['data']['num_points']
       self.nfeatures = nfeatures
 
       # first layer
-      self.conv2d_A = tf.keras.layers.Conv2D(64,[1,1],
-                        padding='valid',
-                        strides=[1,1],
-                        kernel_initializer='GlorotNormal',
-                        kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      if use_kernel_reg:
+         self.conv2d_A = tf.keras.layers.Conv2D(64,[1,1],
+                           padding='valid',
+                           strides=[1,1],
+                           kernel_initializer='GlorotNormal',
+                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.conv2d_A = tf.keras.layers.Conv2D(64,[1,1],
+                           padding='valid',
+                           strides=[1,1],
+                           kernel_initializer='GlorotNormal')
       self.bn_A = tf.keras.layers.BatchNormalization()
       self.relu = tf.keras.layers.ReLU()
 
       # second layer
-      self.conv2d_B = tf.keras.layers.Conv2D(128,[1,1],
-                        padding='valid',
-                        strides=[1,1],
-                        kernel_initializer='GlorotNormal',
-                        kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      if use_kernel_reg:
+         self.conv2d_B = tf.keras.layers.Conv2D(128,[1,1],
+                           padding='valid',
+                           strides=[1,1],
+                           kernel_initializer='GlorotNormal',
+                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.conv2d_B = tf.keras.layers.Conv2D(128,[1,1],
+                           padding='valid',
+                           strides=[1,1],
+                           kernel_initializer='GlorotNormal')
       self.bn_B = tf.keras.layers.BatchNormalization()
 
       # third layer
-      self.conv2d_C = tf.keras.layers.Conv2D(1024,[1,1],
-                        padding='valid',
-                        strides=[1,1],
-                        kernel_initializer='GlorotNormal',
-                        kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      if use_kernel_reg:
+         self.conv2d_C = tf.keras.layers.Conv2D(1024,[1,1],
+                           padding='valid',
+                           strides=[1,1],
+                           kernel_initializer='GlorotNormal',
+                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.conv2d_C = tf.keras.layers.Conv2D(1024,[1,1],
+                           padding='valid',
+                           strides=[1,1],
+                           kernel_initializer='GlorotNormal')
       self.bn_C = tf.keras.layers.BatchNormalization()
       self.max_pool2d_C = tf.keras.layers.MaxPool2D(pool_size=[self.num_points,1],strides=[2,2])
 
       # fourth layer
-      self.dense_D = tf.keras.layers.Dense(512,kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+
+      if use_kernel_reg:
+         self.dense_D = tf.keras.layers.Dense(512,kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.dense_D = tf.keras.layers.Dense(512)
       self.bn_D = tf.keras.layers.BatchNormalization()
       # fifth layer
-      self.dense_E = tf.keras.layers.Dense(256,kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+
+      if use_kernel_reg:
+         self.dense_E = tf.keras.layers.Dense(256,kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.dense_E = tf.keras.layers.Dense(256)
       self.bn_E = tf.keras.layers.BatchNormalization()
 
       # sixth layer
@@ -98,7 +124,7 @@ class InputTransformNet(tf.keras.Model):
 
 class DGCNN(tf.keras.Model):
 
-   def __init__(self,config):
+   def __init__(self,config,use_kernel_reg=False):
       super(DGCNN, self).__init__()
       self.knn_k = config['model']['knn']
       self.num_features = config['data']['num_features']
@@ -106,60 +132,111 @@ class DGCNN(tf.keras.Model):
       self.batch_size = config['data']['batch_size']
       self.num_points = config['data']['num_points']
       
-      self.transform = InputTransformNet(config,self.num_features)
+      self.transform = InputTransformNet(config,self.num_features,use_kernel_reg)
 
-      self.conv2d_A = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
-                        kernel_initializer='GlorotNormal',
-                        kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      if use_kernel_reg:
+         self.conv2d_A = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal',
+                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.conv2d_A = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal')
+
       self.bn_A = tf.keras.layers.BatchNormalization()
       self.relu = tf.keras.layers.ReLU()
 
-      self.conv2d_B = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
-                        kernel_initializer='GlorotNormal',
-                        kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      if use_kernel_reg:
+         self.conv2d_B = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal',
+                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.conv2d_B = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal')
       self.bn_B = tf.keras.layers.BatchNormalization()
 
-      self.conv2d_C = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
-                        kernel_initializer='GlorotNormal',
-                        kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      if use_kernel_reg:
+         self.conv2d_C = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal',
+                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.conv2d_C = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal')
       self.bn_C = tf.keras.layers.BatchNormalization()
 
-      self.conv2d_D = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
-                        kernel_initializer='GlorotNormal',
-                        kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      
+      if use_kernel_reg:
+         self.conv2d_D = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal',
+                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.conv2d_D = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal')
       self.bn_D = tf.keras.layers.BatchNormalization()
 
-      self.conv2d_E = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
-                        kernel_initializer='GlorotNormal',
-                        kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      if use_kernel_reg:
+         self.conv2d_E = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal',
+                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.conv2d_E = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal')
       self.bn_E = tf.keras.layers.BatchNormalization()
 
-      self.conv2d_F = tf.keras.layers.Conv2D(1024,[1,1],padding='valid',strides=[1,1],
-                        kernel_initializer='GlorotNormal',
-                        kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      # if use_kernel_reg:
+      #    self.conv2d_EE = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
+      #                      kernel_initializer='GlorotNormal',
+      #                      kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      # else:
+      #    self.conv2d_EE = tf.keras.layers.Conv2D(64,[1,1],padding='valid',strides=[1,1],
+      #                      kernel_initializer='GlorotNormal')
+      # self.bn_EE = tf.keras.layers.BatchNormalization()
+
+      if use_kernel_reg:
+         self.conv2d_F = tf.keras.layers.Conv2D(1024,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal',
+                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.conv2d_F = tf.keras.layers.Conv2D(1024,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal')
       self.bn_F = tf.keras.layers.BatchNormalization()
 
       self.max_pool2d_F = tf.keras.layers.MaxPool2D(pool_size=[self.num_points,1],strides=[2,2])
 
-      self.conv2d_G = tf.keras.layers.Conv2D(256,[1,1],padding='valid',strides=[1,1],
-                        kernel_initializer='GlorotNormal',
-                        kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      if use_kernel_reg:
+         self.conv2d_G = tf.keras.layers.Conv2D(512,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal',
+                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.conv2d_G = tf.keras.layers.Conv2D(512,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal')
 
-      self.dropout_G = tf.keras.layers.Dropout(0.6)
+      # self.dropout_G = tf.keras.layers.Dropout(0.6)
 
-      self.conv2d_H = tf.keras.layers.Conv2D(256,[1,1],padding='valid',strides=[1,1],
-                        kernel_initializer='GlorotNormal',
-                        kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      if use_kernel_reg:
+         self.conv2d_H = tf.keras.layers.Conv2D(256,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal',
+                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.conv2d_H = tf.keras.layers.Conv2D(256,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal')
 
-      self.dropout_H = tf.keras.layers.Dropout(0.6)
+      self.dropout_H = tf.keras.layers.Dropout(0.5)
       
-      self.conv2d_I = tf.keras.layers.Conv2D(128,[1,1],padding='valid',strides=[1,1],
-                        kernel_initializer='GlorotNormal',
-                        kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      if use_kernel_reg:
+         self.conv2d_I = tf.keras.layers.Conv2D(128,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal',
+                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.conv2d_I = tf.keras.layers.Conv2D(128,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal')
 
-      self.conv2d_J = tf.keras.layers.Conv2D(self.num_classes,[1,1],padding='valid',strides=[1,1],
-                        kernel_initializer='GlorotNormal',
-                        kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      if use_kernel_reg:
+         self.conv2d_J = tf.keras.layers.Conv2D(self.num_classes,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal',
+                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      else:
+         self.conv2d_J = tf.keras.layers.Conv2D(self.num_classes,[1,1],padding='valid',strides=[1,1],
+                           kernel_initializer='GlorotNormal')
    
    def call(self, point_cloud, training=False):
 
@@ -208,6 +285,10 @@ class DGCNN(tf.keras.Model):
       net3 = self.conv2d_E(edge_feature)
       net3 = self.bn_E(net3,training)
       net3 = self.relu(net3)
+
+      # net3 = self.conv2d_EE(net3)
+      # net3 = self.bn_EE(net3,training)
+      # net3 = self.relu(net3)
       
       net3 = tf.reduce_max(net3, axis=-2, keepdims=True)
 
@@ -223,7 +304,7 @@ class DGCNN(tf.keras.Model):
       net = tf.concat([net,net1,net2,net3],axis=3)
 
       net = self.conv2d_G(net)
-      net = self.dropout_G(net,training)
+      # net = self.dropout_G(net,training)
 
       net = self.conv2d_H(net)
       net = self.dropout_H(net,training)
@@ -246,14 +327,12 @@ class DGCNN(tf.keras.Model):
          Returns:
           pairwise distance: (batch_size, num_points, num_points)
       """
-      og_batch_size = point_cloud.get_shape().as_list()[0]
+      og_batch_size = point_cloud.shape[0]
       point_cloud = tf.squeeze(point_cloud)
       if og_batch_size == 1:
-       point_cloud = tf.expand_dims(point_cloud, 0)
+         point_cloud = tf.expand_dims(point_cloud, 0)
        
-      point_cloud_transpose = tf.transpose(point_cloud, perm=[0, 2, 1])
-      point_cloud_inner = tf.matmul(point_cloud, point_cloud_transpose)
-      point_cloud_inner = -2 * point_cloud_inner
+      point_cloud_inner = -2 * tf.matmul(point_cloud, point_cloud, transpose_b=True)
       point_cloud_square = tf.reduce_sum(tf.square(point_cloud), axis=-1, keepdims=True)
       point_cloud_square_tranpose = tf.transpose(point_cloud_square, perm=[0, 2, 1])
       return point_cloud_square + point_cloud_inner + point_cloud_square_tranpose
@@ -268,8 +347,7 @@ class DGCNN(tf.keras.Model):
       Returns:
        nearest neighbors: (batch_size, num_points, k)
       """
-      neg_adj = -adj_matrix
-      dist, nn_idx = tf.nn.top_k(neg_adj, k=tf.cast(k,tf.int32))
+      dist, nn_idx = tf.math.top_k(tf.negative(adj_matrix), k=tf.cast(k,tf.int32))
       if not returnDist:
          return nn_idx
       else:
@@ -286,17 +364,21 @@ class DGCNN(tf.keras.Model):
       Returns:
        edge features: (batch_size, num_points, k, num_dims)
       """
-      og_batch_size = point_cloud.get_shape().as_list()[0]
+      og_batch_size = point_cloud.shape[0]
       point_cloud = tf.squeeze(point_cloud)
       if og_batch_size == 1:
          point_cloud = tf.expand_dims(point_cloud, 0)
 
       point_cloud_central = point_cloud
 
+      # shape = [batch_size]
       idx_ = tf.range(point_cloud.shape[0]) * point_cloud.shape[1]
+      # shape = [batch_size,1,1]
       idx_ = tf.reshape(idx_, [point_cloud.shape[0], 1, 1])
 
+      # shape = [batch_size*num_points,nfeatures]
       point_cloud_flat = tf.reshape(point_cloud, [-1, point_cloud.shape[2]])
+      # shape = [batch_size*num_points,nfeatures]
       point_cloud_neighbors = tf.gather(point_cloud_flat, nn_idx + idx_)
       point_cloud_central = tf.expand_dims(point_cloud_central, axis=-2)
 
