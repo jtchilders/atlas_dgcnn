@@ -16,7 +16,7 @@ col_dtype    = {'id': np.int64, 'index': np.int32, 'x': np.float32, 'y': np.floa
                 'Et': np.float32, 'pid': np.int32, 'pn': np.int32, 'peta': np.float32,
                 'pphi': np.float32, 'ppt': np.float32,
                 'trk_good': np.float32, 'trk_id': np.float32, 'trk_pt': np.float32}
-include_cols = ['x','y','z','r','eta','phi','Et']
+include_cols = ['x','y','z','eta','phi','r','Et']
 gnum_points = None
 gnum_features = None
 
@@ -100,12 +100,26 @@ def load_csv_file_py(filename):
    if len(df) > gnum_points:
       df = df[0:gnum_points]
 
-   # build the model inputs
-   df_inputs = df[include_cols].to_numpy()
    # logger.info('1 df_inputs: %s',df_inputs.shape)
    # normalize variables
-   scaler = MinMaxScaler()
-   df_inputs = scaler.fit_transform(df_inputs)
+   if False:
+      # build the model inputs
+      df_inputs = df[include_cols].to_numpy()
+      scaler = MinMaxScaler()
+      df_inputs = scaler.fit_transform(df_inputs)
+   else:
+      r_mean = df['r'].mean()
+      r_sigma = df['r'].std()
+      df['r'] -= r_mean
+      df['r'] /= (r_sigma + np.finfo(np.float32).eps)
+
+      et_mean = df['Et'].mean()
+      et_sigma = df['Et'].std()
+      df['Et'] -= et_mean
+      df['Et'] /= (et_sigma + np.finfo(np.float32).eps)
+
+      # build the model inputs
+      df_inputs = df[include_cols].to_numpy()
    # logger.info('2 df_inputs: %s',df_inputs.shape)
    # tf.print('df_inputs: ',df_inputs[0:10,...])
 
