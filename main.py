@@ -10,7 +10,6 @@ from tensorflow.keras.mixed_precision import experimental as mixed_precision
 import data_handler
 import model,lr_func,losses,accuracies
 import sklearn.metrics
-
 logger = logging.getLogger(__name__)
 DEFAULT_CONFIG = 'config.json'
 DEFAULT_INTEROP = int(os.cpu_count() / 4)
@@ -35,6 +34,7 @@ def main():
    parser.add_argument('--batch-term',dest='batch_term',type=int,help='if set, terminates training after the specified number of batches',default=0)
 
    parser.add_argument('--evaluate',help='evaluate a pre-trained model file on the test data set only.')
+   parser.add_argument('--train-more',dest='train_more',help='load a pre-trained model file and continue training.')
 
    parser.add_argument('--debug', dest='debug', default=False, action='store_true', help="Set Logger to DEBUG")
    parser.add_argument('--error', dest='error', default=False, action='store_true', help="Set Logger to ERROR")
@@ -49,6 +49,10 @@ def main():
    logging_datefmt = '%Y-%m-%d %H:%M:%S'
    logging_level = logging.INFO
    if args.horovod:
+      print('importing horovod')
+      sys.stdout.flush()
+      sys.stderr.flush()
+
       import horovod
       import horovod.tensorflow as hvd
       hvd.init()
@@ -116,12 +120,18 @@ def main():
       config['model_file'] = args.evaluate
       config['training']['epochs'] = 1
       logger.info('evaluating model file:      %s',args.evaluate)
-   
+   elif args.train_more is not None:
+      config['train_more'] = True
+      config['model_file'] = args.train_more
+      logger.info('continuing model file:      %s',args.train_more)
+
    logger.info('-=-=-=-=-=-=-=-=-  CONFIG FILE -=-=-=-=-=-=-=-=-')
    logger.info('%s = \n %s',args.config_filename,json.dumps(config,indent=4,sort_keys=True))
    logger.info('-=-=-=-=-=-=-=-=-  CONFIG FILE -=-=-=-=-=-=-=-=-')
    config['hvd'] = hvd
 
+   sys.stdout.flush()
+   sys.stderr.flush()
 
    trainds,testds = data_handler.get_datasets(config)
    
@@ -130,6 +140,8 @@ def main():
 
    if args.evaluate:
       net.load_weights(args.evaluate)
+   elif args.train_more:
+      net.load_weights(args.train_more)
 
    loss_func = losses.get_loss(config)
 
@@ -187,6 +199,7 @@ def main():
 
          pred = tf.cast(tf.argmax(pred,-1,),tf.int32)
          correct = tf.math.reduce_sum(nonzero_mask * tf.cast(tf.math.equal(pred,labels),tf.int32))
+
          all_correct = correct
          all_nonzero = nonzero
          all_iou = get_iou(labels,pred,num_classes,nonzero_mask)
@@ -284,22 +297,24 @@ def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,
    for inputs, labels, class_weights, nonzero_mask in dataset:
       # logger.error('%03d start train step',batch_num)
       loss_value,pred = train_step(net,loss_func,opt,inputs,labels,first_batch,config['hvd'],class_weights)
-      # logger.error('%03d start train step',batch_num)
+      # logger.error('%03d done train step',batch_num)
+      
       tf.summary.experimental.set_step(batch_num + batches_per_epoch * epoch_num)
 
       class_weights = tf.cast(class_weights,tf.int32)
+      # number of non-zero points in this batch
       nonzero = tf.math.reduce_sum(class_weights).numpy()
       status_nonzero += nonzero
 
-      # logger.error('%03d after nonzero',batch_num)
       first_batch = False
       batch_num += 1
 
-      train_loss_metric += tf.reduce_mean(loss_value) * (num_points / nonzero)
-
+      # average loss value over batches for status message
+      train_loss_metric += loss_value
+      
       pred = tf.cast(tf.argmax(pred,-1,),tf.int32)
       correct = tf.math.reduce_sum(class_weights * tf.cast(tf.math.equal(pred,labels),tf.int32))
-
+      
       confusion_matrix += sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=class_weights.numpy().flatten(),normalize='true')
       
       status_correct += correct.numpy()
@@ -365,15 +380,20 @@ def train_step(net,loss_func,opt,inputs,labels,first_batch=False,hvd=None,class_
    with tf.GradientTape() as tape:
       # tf.print(':%05d: in gradtape' % hvd.rank())
       pred = net(inputs, training=True)
-      # tf.print(':%05d: got pred' % hvd.rank())
-      loss_value = loss_func(labels, pred,sample_weight=class_weights)
-      # tf.print(':%05d: got loss' % hvd.rank())
+      # pred shape: [batches,points,classes]
+      # labels shape: [batches,points]
+      loss_value = loss_func(labels, pred)
+      # loss_value shape: [batches,points]
+      class_weights = tf.cast(class_weights,tf.float32)
+      loss_value *= class_weights
+      # loss_value shape: [batches,points]
+      loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(class_weights,out_type=tf.float32) / tf.math.reduce_sum(class_weights))
+      # loss_value shape: [1]
    
    if hvd:
       tape = hvd.DistributedGradientTape(tape)
    grads = tape.gradient(loss_value, net.trainable_variables)
    opt.apply_gradients(zip(grads, net.trainable_variables))
-   # tf.print(':%05d: applied grads' % hvd.rank())
    # Horovod: broadcast initial variable states from rank 0 to all other processes.
    # This is necessary to ensure consistent initialization of all workers when
    # training is started with random weights or restored from a checkpoint.
@@ -383,8 +403,7 @@ def train_step(net,loss_func,opt,inputs,labels,first_batch=False,hvd=None,class_
    if hvd and first_batch:
       hvd.broadcast_variables(net.variables, root_rank=root_rank)
       hvd.broadcast_variables(opt.variables(), root_rank=root_rank)
-   # tf.print(':%05d: exiting train step' % hvd.rank())
-
+   
    return loss_value,pred
 
 
@@ -394,9 +413,10 @@ def test_step(net,loss_func,inputs,labels,class_weights):
    # behavior during training versus inference (e.g. Dropout).
    pred = net(inputs, training=False)
 
-   loss_value = loss_func(labels, tf.cast(pred,tf.float32),sample_weight=class_weights)
-   # tf.print(tf.math.reduce_sum(inputs),tf.argmax(tf.nn.softmax(predictions,-1),-1),labels,loss_value)
-
+   loss_value = loss_func(labels, pred)
+   class_weights = tf.cast(class_weights,tf.float32)
+   loss_value *= class_weights
+   loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(class_weights,out_type=tf.float32) / tf.math.reduce_sum(class_weights))
    return loss_value,pred
 
 
