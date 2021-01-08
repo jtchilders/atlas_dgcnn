@@ -206,14 +206,14 @@ class DGCNN(tf.keras.Model):
       self.max_pool2d_F = tf.keras.layers.MaxPool2D(pool_size=[self.num_points,1],strides=[2,2])
 
       if self.use_kernel_reg:
-         self.conv2d_G = tf.keras.layers.Conv2D(512,[1,1],padding='valid',strides=[1,1],
+         self.conv2d_G = tf.keras.layers.Conv2D(256,[1,1],padding='valid',strides=[1,1],
                            kernel_initializer='GlorotNormal',
                            kernel_regularizer=tf.keras.regularizers.L2(1e-3))
       else:
-         self.conv2d_G = tf.keras.layers.Conv2D(512,[1,1],padding='valid',strides=[1,1],
+         self.conv2d_G = tf.keras.layers.Conv2D(256,[1,1],padding='valid',strides=[1,1],
                            kernel_initializer='GlorotNormal')
 
-      # self.dropout_G = tf.keras.layers.Dropout(0.6)
+      self.dropout_G = tf.keras.layers.Dropout(self.dropout)
 
       if self.use_kernel_reg:
          self.conv2d_H = tf.keras.layers.Conv2D(256,[1,1],padding='valid',strides=[1,1],
@@ -241,7 +241,7 @@ class DGCNN(tf.keras.Model):
          self.conv2d_J = tf.keras.layers.Conv2D(self.num_classes,[1,1],padding='valid',strides=[1,1],
                            kernel_initializer='GlorotNormal')
    
-   def call(self, point_cloud, training=False):
+   def call(self, point_cloud, training):
 
       # calculate edge features of the graph
       adj = self.pairwise_distance(point_cloud)
@@ -307,7 +307,7 @@ class DGCNN(tf.keras.Model):
       net = tf.concat([net,net1,net2,net3],axis=3)
 
       net = self.conv2d_G(net)
-      # net = self.dropout_G(net,training)
+      net = self.dropout_G(net,training)
 
       net = self.conv2d_H(net)
       net = self.dropout_H(net,training)
@@ -334,7 +334,8 @@ class DGCNN(tf.keras.Model):
       point_cloud = tf.squeeze(point_cloud)
       if og_batch_size == 1:
          point_cloud = tf.expand_dims(point_cloud, 0)
-       
+      
+      # batch-wise sqaure, transpose point_cloud like (0,2,1), then multiply
       point_cloud_inner = -2 * tf.matmul(point_cloud, point_cloud, transpose_b=True)
       point_cloud_square = tf.reduce_sum(tf.square(point_cloud), axis=-1, keepdims=True)
       point_cloud_square_tranpose = tf.transpose(point_cloud_square, perm=[0, 2, 1])
