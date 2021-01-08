@@ -94,8 +94,6 @@ def main():
    if hvd and len(gpus) > 0:
       tf.config.set_visible_devices(gpus[hvd.local_rank() % len(gpus)],'GPU')
    
-
-   
    logging.info(   'using tensorflow version:   %s (%s)',tf.__version__,tf.__git_version__)
    logging.info(   'using tensorflow from:      %s',tf.__file__)
    if hvd:
@@ -157,6 +155,11 @@ def main():
       test_ele_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'ele_iou')
       test_bkg_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'bkg_iou')
 
+      #tf.keras.utils.plot_model(net, "network_model.png", show_shapes=True)
+      
+      #with train_summary_writer.as_default():
+        #tf.summary.graph(train_step.get_concrete_function().graph)
+
    first_batch = True
    batches_per_epoch = 0
    exit = False
@@ -191,7 +194,7 @@ def main():
          nonzero_mask = tf.cast(nonzero_mask,tf.int32)
          nonzero = tf.math.reduce_sum(nonzero_mask).numpy()
          
-         all_loss = tf.reduce_mean(loss_value) * (num_points / nonzero)
+         all_loss = loss_value
          if hvd:
             all_loss = hvd.allreduce(all_loss)
          
@@ -207,7 +210,7 @@ def main():
          if hvd:
             all_correct = hvd.allreduce(all_correct,op=hvd.mpi_ops.Sum)
             all_nonzero = hvd.allreduce(all_nonzero,op=hvd.mpi_ops.Sum)
-            all_iou = hvd.allreduce(all_iou)
+            all_iou = hvd.allreduce(all_iou,op=hvd.mpi_ops.Sum)
          total_nonzero += all_nonzero.numpy()
          total_correct += all_correct.numpy()
          total_iou += all_iou.numpy()
@@ -228,7 +231,7 @@ def main():
       if rank == 0:
          test_loss = total_loss / test_num
          test_accuracy = total_correct / total_nonzero
-         test_iou = total_iou / test_num
+         test_iou = total_iou / test_num / nranks
          template = 'Epoch {:10d}, Loss: {:10.5f}, Accuracy: {:10.5f}, Test Loss: {:10.5f}, Test Accuracy: {:10.5f}'
          logger.info(template.format(epoch_num + 1,
                                loss,
@@ -359,8 +362,8 @@ def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,
          break
       # for testing
       # logger.error('%03d end of loop',batch_num)
+      # if batch_num == 10: break
    # logger.error('exited loop')
-      # if batch_num == 1: break
    if rank == 0:
       batches_per_epoch = batch_num
       ave_img_rate = image_rate_sum / image_rate_n
@@ -380,15 +383,19 @@ def train_step(net,loss_func,opt,inputs,labels,first_batch=False,hvd=None,class_
    with tf.GradientTape() as tape:
       # tf.print(':%05d: in gradtape' % hvd.rank())
       pred = net(inputs, training=True)
-      # pred shape: [batches,points,classes]
-      # labels shape: [batches,points]
-      loss_value = loss_func(labels, pred)
-      # loss_value shape: [batches,points]
-      class_weights = tf.cast(class_weights,tf.float32)
-      loss_value *= class_weights
-      # loss_value shape: [batches,points]
-      loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(class_weights,out_type=tf.float32) / tf.math.reduce_sum(class_weights))
-      # loss_value shape: [1]
+      # # pred shape: [batches,points,classes]
+      # # labels shape: [batches,points]
+      # loss_value = loss_func(labels, pred)
+      # # loss_value shape: [batches,points]
+      # class_weights = tf.cast(class_weights,tf.float32)
+      # loss_value *= class_weights
+      # # loss_value shape: [batches,points]
+      # loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(class_weights,out_type=tf.float32) / tf.math.reduce_sum(class_weights))
+      # # loss_value shape: [1]
+
+      targets = tf.cast(tf.one_hot(labels,3),tf.float32)
+      totalweights = tf.expand_dims(tf.cast(class_weights,tf.float32),axis=2)
+      loss_value = tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(labels=targets,logits=pred,pos_weight=totalweights))
    
    if hvd:
       tape = hvd.DistributedGradientTape(tape)
@@ -413,10 +420,13 @@ def test_step(net,loss_func,inputs,labels,class_weights):
    # behavior during training versus inference (e.g. Dropout).
    pred = net(inputs, training=False)
 
-   loss_value = loss_func(labels, pred)
-   class_weights = tf.cast(class_weights,tf.float32)
-   loss_value *= class_weights
-   loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(class_weights,out_type=tf.float32) / tf.math.reduce_sum(class_weights))
+   # loss_value = loss_func(labels, pred)
+   # class_weights = tf.cast(class_weights,tf.float32)
+   # loss_value *= class_weights
+   # loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(class_weights,out_type=tf.float32) / tf.math.reduce_sum(class_weights))
+   targets = tf.cast(tf.one_hot(labels,3),tf.float32)
+   totalweights = tf.expand_dims(tf.cast(class_weights,tf.float32),axis=2)
+   loss_value = tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(labels=targets,logits=pred,pos_weight=totalweights))
    return loss_value,pred
 
 
@@ -451,7 +461,6 @@ def get_optimizer(config):
       else:
          raise Exception('failed to find lr_schedule: %s' % lrs_name)
 
-
    opt_name = config['optimizer']['name']
    opt_args = config['optimizer'].get('args',{})
    if hasattr(tf.keras.optimizers, opt_name):
@@ -471,17 +480,31 @@ def get_optimizer(config):
 
 
 def get_iou(truth,pred,num_classes,mask):
-
+   # truth shape: [batch,points]
+   # pred shape: [batch,points]
+   # mask shape: [batch,points]
+   # num_classes = int
+   # empty holder of output
    iou = np.zeros(num_classes)
+   # loop over classes
    for i in range(num_classes):
+      # truth entries equal to this class label
       truth_classes = tf.math.equal(truth,i)
+      # logger.info('class %d truth_classes: %s',i,tf.math.reduce_sum(tf.cast(truth_classes,tf.int32)))
+      # prediction entries equal to this class label
       pred_classes  = tf.math.equal(pred,i)
+      # logger.info('class %d pred_classes: %s',i,tf.math.reduce_sum(tf.cast(pred_classes,tf.int32)))
       
+      # (truth_classes == pred_classes) * mask
       intersection = tf.cast(tf.math.logical_and(truth_classes,pred_classes),tf.int32) * mask
       intersection = tf.math.reduce_sum(intersection)
+      # logger.info('class %d intersection: %s',i,intersection)
 
+      # (truth_classes || pred_classes) * mask
       union = tf.cast(tf.math.logical_or(truth_classes,pred_classes),tf.int32) * mask
       union = tf.math.reduce_sum(union)
+      # logger.info('class %d union: %s',i,union)
+
       iou[i] = intersection / union
    return iou
 
