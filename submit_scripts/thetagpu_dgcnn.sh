@@ -1,10 +1,13 @@
 #!/bin/bash -l
 #COBALT -O logdir/$COBALT_JOBID
 #COBALT -t 360
-#COBALT -n 2
+#COBALT -n 8
 #COBALT -A datascience
 
-MCONDA=/lus/theta-fs0/software/thetagpu/conda/tf_master/2020-12-17/mconda3
+#MCONDA=/lus/theta-fs0/software/thetagpu/conda/tf_master/2020-12-17/mconda3
+#MCONDA=/lus/theta-fs0/software/thetagpu/conda/tf_master/2020-11-11/mconda3
+#MCONDA=/lus/theta-fs0/software/thetagpu/conda/tf_master/2020-12-23/mconda3
+MCONDA=/lus/theta-fs0/software/thetagpu/conda/tf_master/2021-01-08/mconda3
 source $MCONDA/setup.sh
 
 NODES=`cat $COBALT_NODEFILE | wc -l`
@@ -30,7 +33,7 @@ mkdir -p $LOGDIR
 echo $LOGDIR
 cp $0 logdir/$COBALT_JOBID.sh
 #export TF_ENABLE_AUTO_MIXED_PRECISION=1
-#export TF_XLA_FLAGS=--tf_xla_auto_jit=1
+# export TF_XLA_FLAGS=--tf_xla_auto_jit=1
 #export TF_XLA_FLAGS=--tf_xla_auto_jit=fusible
 $EXEC main.py -c configs/atlas_dgcnn_thetagpu.json --interop $OMP_NUM_THREADS --intraop $OMP_NUM_THREADS \
-   --logdir $LOGDIR $HOROVOD #--profiler --batch-term 50 
+   --logdir $LOGDIR $HOROVOD --batch-term 20 #--profiler 

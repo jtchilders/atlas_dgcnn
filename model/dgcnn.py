@@ -14,6 +14,7 @@ class ConvBnLayer(tf.keras.layers.Layer):
                 activation='ReLU'):
       super(ConvBnLayer,self).__init__()
       self.conv = tf.keras.layers.Conv2D(features,kernel,padding=padding,
+                                         strides=strides,
                                          kernel_initializer=kernel_initializer,
                                          kernel_regularizer=kernel_regularizer)
       self.bn   = tf.keras.layers.BatchNormalization()
@@ -26,7 +27,9 @@ class ConvBnLayer(tf.keras.layers.Layer):
 
    def call(self,inputs,training=False):
       conv = self.conv(inputs)
-      bn = self.bn(conv,training)
+      tf.print(self.name,'conv = ',conv.shape,tf.reduce_sum(conv),tf.reduce_mean(conv),conv[0,0:10,0,0])
+      bn = self.bn(conv,training=training)
+      tf.print(self.name,'bn = ',bn.shape,tf.reduce_sum(bn),tf.reduce_mean(bn),bn[0,0:10,0,0])
       if self.activ:
          return self.activ(bn)
       else:
@@ -50,7 +53,9 @@ class DenseBnLayer(tf.keras.layers.Layer):
 
    def call(self,inputs,training=False):
       dense = self.dense(inputs)
-      bn = self.bn(dense,training)
+      tf.print(self.name,'dense = ',dense.shape,tf.reduce_sum(dense),tf.reduce_mean(dense),dense[0,0:10])
+      bn = self.bn(dense,training=training)
+      tf.print(self.name,'bn = ',bn.shape,tf.reduce_sum(bn),tf.reduce_mean(bn),bn[0,0:10])
       if self.activ:
          return self.activ(bn)
       else:
@@ -98,8 +103,6 @@ class EdgeLayer(tf.keras.layers.Layer):
        nearest neighbors: (batch_size, num_points, k)
       """
       dist, nn_idx = tf.math.top_k(tf.negative(adj_matrix), k=self.k)
-
-      #inputs = tf.expand_dims(inputs,-1)
       
       """Construct edge feature for each point
       Args:
@@ -129,15 +132,41 @@ class EdgeLayer(tf.keras.layers.Layer):
       return edge_feature
 
 
+class TransformOutputLayer(tf.keras.layers.Layer):
+   def __init__(self,nfeatures):
+      super(TransformOutputLayer,self).__init__()
+      self.flatten = tf.keras.layers.Flatten()
+      self.reshape = tf.keras.layers.Reshape([nfeatures,nfeatures])
+      self.nfeatures = nfeatures
+
+   def build(self,input_shape):
+      units = input_shape[1]
+
+      self.w = self.add_weight("input_transform_weights",shape=[units,self.nfeatures * self.nfeatures],initializer='zeros',trainable=True)
+      self.b = self.add_weight("input_transform_biases",shape=[self.nfeatures * self.nfeatures],initializer='zeros',trainable=True)
+      eye = tf.Variable(tf.reshape(tf.eye(self.nfeatures),[-1]),dtype=tf.float32,trainable=False)
+      self.b.assign_add(eye)
+
+   def call(self,inputs,training=False):
+      transform = tf.matmul(inputs, self.w) + self.b
+      transform = self.reshape(transform)
+      return transform
+
+
 class InputTransformNet(tf.keras.layers.Layer):
    """ Input (XYZ) Transform Net, input is BxNx3 gray image
     Return:
       Transformation matrix of size 3xK """
-   def __init__(self,config,use_kernel_reg=False):
+   def __init__(self,config):
       super(InputTransformNet,self).__init__()
+
+      self.use_kernel_reg = config['model']['use_kernel_reg']
+      self.kernel_reg = config['model']['kernel_reg']
+      self.nfeatures = config['data']['num_features']
+      self.batch_size = config['data']['batch_size']
       
-      if use_kernel_reg:
-         kernel_regularizer = tf.keras.regularizers.L2(5e-3)
+      if self.use_kernel_reg:
+         kernel_regularizer = tf.keras.regularizers.L2(self.kernel_reg)
       else:
          kernel_regularizer = None
 
@@ -156,21 +185,13 @@ class InputTransformNet(tf.keras.layers.Layer):
       self.dense_E = DenseBnLayer(256,kernel_regularizer=kernel_regularizer)
 
       # last layer in build function
+      self.trans_output = TransformOutputLayer(self.nfeatures)
 
    def build(self,input_shape):
-      self.batch_size = input_shape[0]
       num_points = input_shape[1]
-      # knn = input_shape[2]
-      nfeatures = int(input_shape[3] / 2)
 
       self.max_pool2d_C = tf.keras.layers.MaxPool2D(pool_size=[num_points,1],strides=[2,2])
 
-      self.const_init = tf.constant_initializer(0.0)
-      self.input_transform_weights = tf.Variable(self.const_init([256,nfeatures * nfeatures],dtype=tf.float32),name='input_transform_weights')
-      self.input_transform_biases = tf.Variable(self.const_init([nfeatures * nfeatures],dtype=tf.float32),name='input_transform_biases')
-      self.input_transform_biases.assign_add(tf.constant(np.eye(nfeatures).flatten(), dtype=tf.float32))
-
-      self.nfeatures = nfeatures
 
    def call(self,edge_feature,training=False):
 
@@ -187,32 +208,31 @@ class InputTransformNet(tf.keras.layers.Layer):
       net = self.dense_E(net,training)
 
       # build transformation
-      transform = tf.matmul(net, self.input_transform_weights)
-      transform = tf.nn.bias_add(transform, self.input_transform_biases)
-      transform = tf.reshape(transform, [self.batch_size, self.nfeatures, self.nfeatures])
+      transform = self.trans_output(net,training)
       return transform
 
 
 class DGCNN(tf.keras.Model):
 
-   def __init__(self,config,use_kernel_reg=False):
+   def __init__(self,config):
       super(DGCNN, self).__init__()
       self.knn_k = config['model']['knn']
       self.conv2d_size = config['model']['conv2d_size']
       self.dropout = config['model']['dropout']
       self.use_kernel_reg = config['model']['use_kernel_reg']
+      self.kernel_reg = config['model']['kernel_reg']
       self.num_features = config['data']['num_features']
       self.num_classes = config['data']['num_classes']
       self.batch_size = config['data']['batch_size']
       self.num_points = config['data']['num_points']
       
-      if use_kernel_reg:
-         kernel_regularizer = tf.keras.regularizers.L2(1e-3)
+      if self.use_kernel_reg:
+         kernel_regularizer = tf.keras.regularizers.L2(self.kernel_reg)
       else:
          kernel_regularizer = None
 
       self.input_edge = EdgeLayer(self.knn_k)
-      self.transform = InputTransformNet(config,use_kernel_reg)
+      self.transform = InputTransformNet(config)
 
       self.edge_A   = EdgeLayer(self.knn_k)
       self.conv2d_A = ConvBnLayer(self.conv2d_size,kernel_regularizer=kernel_regularizer)
@@ -238,7 +258,11 @@ class DGCNN(tf.keras.Model):
       self.dropout_H = tf.keras.layers.Dropout(self.dropout)
 
       self.conv2d_I = ConvBnLayer(128,kernel_regularizer=kernel_regularizer)
-      self.conv2d_J = ConvBnLayer(self.num_classes,kernel_regularizer=kernel_regularizer,activation=None)
+
+      self.conv2d_J = tf.keras.layers.Conv2D(self.num_classes,[1,1],
+                                             padding='valid',strides=[1,1],
+                                             kernel_initializer='GlorotNormal',
+                                             kernel_regularizer=kernel_regularizer)
    
    def build(self,input_shape):
       batch_size,num_points,nfeatures = input_shape
@@ -251,42 +275,77 @@ class DGCNN(tf.keras.Model):
    def call(self, point_cloud, training):
       # point_cloud shape: [batch,points,features]
       # calculate edge features of the graph
-      
-      edge_feature = self.input_edge(point_cloud)
+      # tf.print('point_cloud = ',point_cloud.shape,tf.reduce_sum(point_cloud),tf.reduce_mean(point_cloud))
+      edge_feature = self.input_edge(point_cloud,training)
+      # tf.print('edge_feature = ',edge_feature.shape,tf.reduce_sum(edge_feature),tf.reduce_mean(edge_feature))
       transform = self.transform(edge_feature, training)
+      # tf.print('transform = ',transform.shape,tf.reduce_sum(transform),tf.reduce_mean(transform))
       point_cloud_transformed = tf.matmul(point_cloud, transform)
+      # tf.print('point_cloud_transformed = ',point_cloud_transformed.shape,tf.reduce_sum(point_cloud_transformed),tf.reduce_mean(point_cloud_transformed))
 
-      edge_feature = self.edge_A(point_cloud_transformed)
-      net1 = self.conv2d_A(edge_feature)
-      net1 = self.conv2d_B(net1)
+      edge_feature = self.edge_A(point_cloud_transformed,training)
+      x = edge_feature
+      # tf.print('edge_feature = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
+      net1 = self.conv2d_A(edge_feature,training)
+      x = net1
+      # tf.print('net1 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
+      net1 = self.conv2d_B(net1,training)
+      x = net1
+      # tf.print('net1 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
       net1 = tf.reduce_max(net1, axis=-2, keepdims=True)
+      x = net1
+      # tf.print('net1 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
 
-      edge_feature = self.edge_C(net1)
-      net2 = self.conv2d_C(edge_feature)
-      net2 = self.conv2d_D(net2)
+      edge_feature = self.edge_C(net1,training)
+      x = edge_feature
+      # tf.print('edge_feature = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
+      net2 = self.conv2d_C(edge_feature,training)
+      x = net2
+      # tf.print('net2 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
+      net2 = self.conv2d_D(net2,training)
+      x = net2
+      # tf.print('net2 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
       net2 = tf.reduce_max(net2, axis=-2, keepdims=True)
+      x = net2
+      # tf.print('net2 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
 
-      edge_feature = self.edge_C(net2)
-      net3 = self.conv2d_E(edge_feature)
+      edge_feature = self.edge_C(net2,training)
+      x = edge_feature
+      # tf.print('edge_feature = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
+      net3 = self.conv2d_E(edge_feature,training)
+      x = net3
+      # tf.print('net3 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
       net3 = tf.reduce_max(net3, axis=-2, keepdims=True)
+      x = net3
+      # tf.print('net3 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
 
       combo_features = tf.concat([net1,net2,net3],axis=-1)
-      net = self.conv2d_F(combo_features)
+      net = self.conv2d_F(combo_features,training)
       net = self.max_pool2d_F(net)
+      x = net
+      # tf.print('net = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
 
       net = tf.tile(net, [1,self.num_points,1,1])
 
       net = tf.concat([net,net1,net2,net3],axis=3)
 
-      net = self.conv2d_G(net)
-      net = self.dropout_G(net,training)
+      net = self.conv2d_G(net,training)
+      net = self.dropout_G(net,training=training)
+      x = net
+      # tf.print('net = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
 
-      net = self.conv2d_H(net)
-      net = self.dropout_H(net,training)
+      net = self.conv2d_H(net,training)
+      net = self.dropout_H(net,training=training)
+      x = net
+      # tf.print('net = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
 
-      net = self.conv2d_I(net)
+      net = self.conv2d_I(net,training)
+      x = net
+      # tf.print('net = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
 
       net = self.conv2d_J(net)
+      x = net
+      # tf.print('net = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10])
 
       net = tf.squeeze(net)
       

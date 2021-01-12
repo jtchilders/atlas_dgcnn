@@ -116,6 +116,7 @@ def main():
    config['batch_term'] = args.batch_term
    if args.batch_term > 0:
       config['training']['epochs'] = 1
+      config['training']['status'] = 1 if args.batch_term < config['training']['status'] else config['training']['status']
 
    if args.evaluate is not None:
       config['evaluate'] = True
@@ -139,15 +140,23 @@ def main():
    
    logger.info('get model')
    net = model.get_model(config)
+   loss_func = losses.get_loss(config)
+   opt = get_optimizer(config)
 
+   # initialize and create the model
+   # input_shape = [config['data']['batch_size'],config['data']['num_points'],config['data']['num_features']]
+   # output = net(tf.random.uniform(input_shape))
+
+   # load previous model weights
    if args.evaluate:
       net.load_weights(args.evaluate)
    elif args.train_more:
       net.load_weights(args.train_more)
 
-   loss_func = losses.get_loss(config)
-
-   opt = get_optimizer(config)
+   # # synchronize models across ranks
+   # if hvd:
+   #    hvd.broadcast_variables(net.variables, root_rank=0)
+   #    hvd.broadcast_variables(opt.variables(), root_rank=0)
 
    train_summary_writer = None
    test_summary_writer = None
@@ -167,14 +176,7 @@ def main():
       #with train_summary_writer.as_default():
         #tf.summary.graph(train_step.get_concrete_function().graph)
 
-   first_batch = True
    batches_per_epoch = 0
-   exit = False
-   status_count = config['training']['status']
-   batch_size = config['data']['batch_size']
-   num_points = config['data']['num_points']
-   num_classes = config['data']['num_classes']
-   softmax = tf.keras.layers.Softmax()
    for epoch_num in range(config['training']['epochs']):
       
       logger.info('begin epoch %s',epoch_num)
@@ -194,125 +196,6 @@ def main():
                                  loss_func,opt,epoch_num,test_summary_writer,
                                  batches_per_epoch,test_jet_writer,
                                  test_ele_writer,test_bkg_writer)
-      
-      
-
-
-def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,
-                    batches_per_epoch,profiler=None,profrank=0,logdir=None):
-
-   first_batch    = (epoch_num == 0)
-   status_count   = config['training']['status']
-   batch_size     = config['data']['batch_size']
-   num_points     = config['data']['num_points']
-   num_classes    = config['data']['num_classes']
-   rank           = config['rank']
-   batch_num      = 0
-   start          = time.time()
-   train_loss_metric = 0
-   softmax        = tf.keras.layers.Softmax()
-
-   # used for ongoing image rate calculation
-   image_rate_sum = 0.
-   image_rate_sum2 = 0.
-   image_rate_n = 0.
-
-   # used for accuracy (status_ gets zeroed periodically)
-   total_correct = 0.
-   status_correct = 0.
-   total_nonzero = 0.
-   status_nonzero = 0.
-
-   # track confusion matrix
-   confusion_matrix = np.zeros([num_classes,num_classes])
-
-   partial_img_rate = np.zeros(10)
-   partial_img_rate_counter = 0
-   
-   # run Tensorflow Profiling for some number of loops
-   if rank == profrank and profiler:
-      logger.info('profiling')
-      tf.profiler.experimental.start(logdir)
-
-   for inputs, labels, class_weights, nonzero_mask in dataset:
-      # logger.error('%03d start train step',batch_num)
-      loss_value,pred = train_step(net,loss_func,opt,inputs,labels,first_batch,config['hvd'],class_weights)
-      # logger.error('%03d done train step',batch_num)
-      
-      tf.summary.experimental.set_step(batch_num + batches_per_epoch * epoch_num)
-
-      class_weights = tf.cast(class_weights,tf.int32)
-      # number of non-zero points in this batch
-      nonzero = tf.math.reduce_sum(class_weights).numpy()
-      status_nonzero += nonzero
-
-      first_batch = False
-      batch_num += 1
-
-      # average loss value over batches for status message
-      train_loss_metric += loss_value
-      
-      pred = tf.cast(tf.argmax(softmax(pred),-1,),tf.int32)
-      correct = tf.math.reduce_sum(class_weights * tf.cast(tf.math.equal(pred,labels),tf.int32))
-      
-      confusion_matrix += sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=class_weights.numpy().flatten(),normalize='true')
-      
-      status_correct += correct.numpy()
-      
-      # logger.error('%03d run status',batch_num)
-      if batch_num % status_count == 0:
-         img_per_sec = status_count * batch_size * config['nranks'] / (time.time() - start)
-         img_per_sec_std = 0
-         if batch_num > 10:
-            image_rate_n += 1
-            image_rate_sum += img_per_sec
-            image_rate_sum2 += img_per_sec * img_per_sec
-            partial_img_rate[partial_img_rate_counter % 10] = img_per_sec
-            partial_img_rate_counter += 1
-            img_per_sec = np.mean(partial_img_rate[partial_img_rate > 0])
-            img_per_sec_std = np.std(partial_img_rate[partial_img_rate > 0])
-         loss = train_loss_metric / status_count
-         acc = float(status_correct) / status_nonzero
-         total_correct += status_correct
-         total_nonzero += status_nonzero
-         status_correct = 0
-         status_nonzero = 0
-         train_loss_metric = 0
-         logger.info(" [%5d:%5d]: loss = %10.5f acc = %10.5f  imgs/sec = %7.1f +/- %7.1f",
-                        epoch_num,batch_num,loss,acc,img_per_sec,img_per_sec_std)
-         if rank == 0:
-            with tbwriter.as_default():
-               step = epoch_num * batches_per_epoch + batch_num
-               tf.summary.experimental.set_step(step)
-               tf.summary.scalar('metrics/loss', loss, step=step)
-               tf.summary.scalar('metrics/accuracy', acc, step=step)
-               tf.summary.scalar('monitors/img_per_sec',img_per_sec,step=step)
-               tf.summary.scalar('monitors/learning_rate',opt.lr(step))
-         start = time.time()
-      # logger.error('%03d after status',batch_num)
-             
-      if config['batch_term'] == batch_num:
-         logger.info('terminating batch training after %s batches',batch_num)
-         if config['rank'] == profrank and profiler:
-            logger.info('stop profiling')
-            tf.profiler.experimental.stop()
-         break
-      # for testing
-      # logger.error('%03d end of loop',batch_num)
-      # if batch_num == 10: break
-   # logger.error('exited loop')
-   if rank == 0:
-      batches_per_epoch = batch_num
-      ave_img_rate = image_rate_sum / image_rate_n
-      std_img_rate = np.sqrt((1 / image_rate_n) * image_rate_sum2 - ave_img_rate * ave_img_rate)
-      logger.info('batches_per_epoch = %s  Ave Img Rate: %10.5f +/- %10.5f',batches_per_epoch,ave_img_rate,std_img_rate)
-
-      # confustion matrix calc
-      confusion_matrix = confusion_matrix / batch_num
-      logger.info('confusion_matrix = \n %s',confusion_matrix)
-   
-   return loss,acc,confusion_matrix,batch_num,batches_per_epoch
-
 
 
 def get_optimizer(config):
