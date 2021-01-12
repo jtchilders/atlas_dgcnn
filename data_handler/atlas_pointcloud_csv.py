@@ -100,6 +100,13 @@ def load_csv_file_py(filename):
    if len(df) > gnum_points:
       df = df[0:gnum_points]
 
+
+   if gconfig['data']['augment']:
+      rotation_angle,rotation_matrix = random_rotation()
+      df[['x','y','z']] = np.dot(df[['x','y','z']],rotation_matrix)
+      df['phi'] = df['phi'] + (rotation_angle - np.pi)
+      df['phi'] = df['phi'].apply(lambda x: x if x < np.pi else x - np.pi)
+
    # logger.info('1 df_inputs: %s',df_inputs.shape)
    # normalize variables
    if False:
@@ -122,6 +129,7 @@ def load_csv_file_py(filename):
       df_inputs = df[include_cols].to_numpy()
    # logger.info('2 df_inputs: %s',df_inputs.shape)
    # tf.print('df_inputs: ',df_inputs[0:10,...])
+
 
    # stuff ragged event sizes into fixed size
    inputs = np.zeros([gnum_points,gnum_features])
@@ -170,3 +178,14 @@ def load_csv_file_py(filename):
 
    # return inputs and labels
    return inputs,labels,class_weights,nonzero_mask
+
+
+def random_rotation():
+   rotation_angle = np.random.uniform() * 2 * np.pi
+   cosval = np.cos(rotation_angle)
+   sinval = np.sin(rotation_angle)
+   rotation_matrix = np.array([[cosval, -sinval, 0],
+                              [sinval, cosval, 0],
+                              [0, 0, 1]])
+   
+   return rotation_angle,rotation_matrix
