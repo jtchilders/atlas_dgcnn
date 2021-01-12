@@ -27,9 +27,9 @@ class ConvBnLayer(tf.keras.layers.Layer):
 
    def call(self,inputs,training=False):
       conv = self.conv(inputs)
-      tf.print(self.name,'conv = ',conv.shape,tf.reduce_sum(conv),tf.reduce_mean(conv),conv[0,0:10,0,0])
+      # tf.print(self.name,'conv = ',conv.shape,tf.reduce_sum(conv),tf.reduce_mean(conv),conv[0,0:10,0,0])
       bn = self.bn(conv,training=training)
-      tf.print(self.name,'bn = ',bn.shape,tf.reduce_sum(bn),tf.reduce_mean(bn),bn[0,0:10,0,0])
+      # tf.print(self.name,'bn = ',bn.shape,tf.reduce_sum(bn),tf.reduce_mean(bn),bn[0,0:10,0,0])
       if self.activ:
          return self.activ(bn)
       else:
@@ -53,9 +53,9 @@ class DenseBnLayer(tf.keras.layers.Layer):
 
    def call(self,inputs,training=False):
       dense = self.dense(inputs)
-      tf.print(self.name,'dense = ',dense.shape,tf.reduce_sum(dense),tf.reduce_mean(dense),dense[0,0:10])
+      # tf.print(self.name,'dense = ',dense.shape,tf.reduce_sum(dense),tf.reduce_mean(dense),dense[0,0:10])
       bn = self.bn(dense,training=training)
-      tf.print(self.name,'bn = ',bn.shape,tf.reduce_sum(bn),tf.reduce_mean(bn),bn[0,0:10])
+      # tf.print(self.name,'bn = ',bn.shape,tf.reduce_sum(bn),tf.reduce_mean(bn),bn[0,0:10])
       if self.activ:
          return self.activ(bn)
       else:
