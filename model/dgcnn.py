@@ -7,118 +7,189 @@ def get_model(config):
    net = DGCNN(config)
    return net
 
-class InputTransformNet(tf.keras.Model):
+
+class ConvBnLayer(tf.keras.layers.Layer):
+   def __init__(self,features,kernel=[1,1],padding='valid',strides=[1,1],
+                kernel_initializer='GlorotNormal',kernel_regularizer=None,
+                activation='ReLU'):
+      super(ConvBnLayer,self).__init__()
+      self.conv = tf.keras.layers.Conv2D(features,kernel,padding=padding,
+                                         kernel_initializer=kernel_initializer,
+                                         kernel_regularizer=kernel_regularizer)
+      self.bn   = tf.keras.layers.BatchNormalization()
+
+      if activation is not None and hasattr(tf.keras.layers,activation):
+         self.activ = getattr(tf.keras.layers,activation)
+         self.activ = self.activ()
+      else:
+         self.activ = None
+
+   def call(self,inputs,training=False):
+      conv = self.conv(inputs)
+      bn = self.bn(conv,training)
+      if self.activ:
+         return self.activ(bn)
+      else:
+         return bn
+
+
+class DenseBnLayer(tf.keras.layers.Layer):
+   def __init__(self,features,kernel_initializer='GlorotNormal',kernel_regularizer=None,
+                activation='ReLU'):
+      super(DenseBnLayer,self).__init__()
+      self.dense = tf.keras.layers.Dense(features,
+                                         kernel_initializer=kernel_initializer,
+                                         kernel_regularizer=kernel_regularizer)
+      self.bn   = tf.keras.layers.BatchNormalization()
+
+      if activation is not None and hasattr(tf.keras.layers,activation):
+         self.activ = getattr(tf.keras.layers,activation)
+         self.activ = self.activ()
+      else:
+         self.activ = None
+
+   def call(self,inputs,training=False):
+      dense = self.dense(inputs)
+      bn = self.bn(dense,training)
+      if self.activ:
+         return self.activ(bn)
+      else:
+         return bn
+
+
+class EdgeLayer(tf.keras.layers.Layer):
+   def __init__(self,k):
+      super(EdgeLayer,self).__init__()
+      self.k = k
+
+   def build(self,input_shape):
+      if len(input_shape) == 3:
+         self.batch_size,self.num_points,self.nfeatures = input_shape
+      elif len(input_shape) == 4:
+         self.batch_size,self.num_points,_,self.nfeatures = input_shape
+
+
+   def call(self,inputs,training=False):
+
+      """Compute pairwise distance of a point cloud.
+
+         Args:
+          inputs: tensor (batch_size, num_points, num_dims)
+
+         Returns:
+          pairwise distance: (batch_size, num_points, num_points)
+      """
+      inputs = tf.squeeze(inputs)
+      if self.batch_size == 1:
+         inputs = tf.expand_dims(inputs, 0)
+      
+      # batch-wise sqaure, transpose point_cloud like (0,2,1), then multiply
+      point_cloud_inner = -2 * tf.matmul(inputs, inputs, transpose_b=True)
+      point_cloud_square = tf.reduce_sum(tf.square(inputs), axis=-1, keepdims=True)
+      point_cloud_square_tranpose = tf.transpose(point_cloud_square, perm=[0, 2, 1])
+      adj_matrix = point_cloud_square + point_cloud_inner + point_cloud_square_tranpose
+
+      """Get KNN based on the pairwise distance.
+      Args:
+       pairwise distance: (batch_size, num_points, num_points)
+       k: int
+
+      Returns:
+       nearest neighbors: (batch_size, num_points, k)
+      """
+      dist, nn_idx = tf.math.top_k(tf.negative(adj_matrix), k=self.k)
+
+      #inputs = tf.expand_dims(inputs,-1)
+      
+      """Construct edge feature for each point
+      Args:
+       point_cloud: (batch_size, num_points, 1, num_dims)
+       nn_idx: (batch_size, num_points, k)
+       k: int
+
+      Returns:
+       edge features: (batch_size, num_points, k, num_dims)
+      """
+
+      # shape = [batch_size]
+      idx_ = tf.range(self.batch_size) * self.num_points
+      # shape = [batch_size,1,1]
+      idx_ = tf.reshape(idx_, [self.batch_size, 1, 1])
+
+      # shape = [batch_size*num_points,nfeatures]
+      point_cloud_flat = tf.reshape(inputs, [-1, self.nfeatures])
+      # shape = [batch_size*num_points,nfeatures]
+      point_cloud_neighbors = tf.gather(point_cloud_flat, nn_idx + idx_)
+      point_cloud_central = tf.expand_dims(inputs, axis=-2)
+
+      point_cloud_central = tf.tile(point_cloud_central, [1, 1, self.k, 1])
+
+      edge_feature = tf.concat([point_cloud_central, point_cloud_neighbors - point_cloud_central], axis=-1)
+
+      return edge_feature
+
+
+class InputTransformNet(tf.keras.layers.Layer):
    """ Input (XYZ) Transform Net, input is BxNx3 gray image
     Return:
       Transformation matrix of size 3xK """
-   def __init__(self,config,nfeatures,use_kernel_reg=False):
+   def __init__(self,config,use_kernel_reg=False):
       super(InputTransformNet,self).__init__()
-      self.batch_size = config['data']['batch_size']
-      self.num_points = config['data']['num_points']
+      
+      if use_kernel_reg:
+         kernel_regularizer = tf.keras.regularizers.L2(5e-3)
+      else:
+         kernel_regularizer = None
+
+      self.conv2d_A = ConvBnLayer(64,kernel_regularizer=kernel_regularizer)
+      self.conv2d_B = ConvBnLayer(128,kernel_regularizer=kernel_regularizer)
+      
+      # reduce_max happens in between
+
+      self.conv2d_C = ConvBnLayer(1024,kernel_regularizer=kernel_regularizer)
+
+      # max pool
+
+      # reshape
+
+      self.dense_D = DenseBnLayer(512,kernel_regularizer=kernel_regularizer)
+      self.dense_E = DenseBnLayer(256,kernel_regularizer=kernel_regularizer)
+
+      # last layer in build function
+
+   def build(self,input_shape):
+      self.batch_size = input_shape[0]
+      num_points = input_shape[1]
+      # knn = input_shape[2]
+      nfeatures = int(input_shape[3] / 2)
+
+      self.max_pool2d_C = tf.keras.layers.MaxPool2D(pool_size=[num_points,1],strides=[2,2])
+
+      self.const_init = tf.constant_initializer(0.0)
+      self.input_transform_weights = tf.Variable(self.const_init([256,nfeatures * nfeatures],dtype=tf.float32),name='input_transform_weights')
+      self.input_transform_biases = tf.Variable(self.const_init([nfeatures * nfeatures],dtype=tf.float32),name='input_transform_biases')
+      self.input_transform_biases.assign_add(tf.constant(np.eye(nfeatures).flatten(), dtype=tf.float32))
+
       self.nfeatures = nfeatures
 
-      # first layer
-      if use_kernel_reg:
-         self.conv2d_A = tf.keras.layers.Conv2D(64,[1,1],
-                           padding='valid',
-                           strides=[1,1],
-                           kernel_initializer='GlorotNormal',
-                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      else:
-         self.conv2d_A = tf.keras.layers.Conv2D(64,[1,1],
-                           padding='valid',
-                           strides=[1,1],
-                           kernel_initializer='GlorotNormal')
-      self.bn_A = tf.keras.layers.BatchNormalization()
-      self.relu = tf.keras.layers.ReLU()
-
-      # second layer
-      if use_kernel_reg:
-         self.conv2d_B = tf.keras.layers.Conv2D(128,[1,1],
-                           padding='valid',
-                           strides=[1,1],
-                           kernel_initializer='GlorotNormal',
-                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      else:
-         self.conv2d_B = tf.keras.layers.Conv2D(128,[1,1],
-                           padding='valid',
-                           strides=[1,1],
-                           kernel_initializer='GlorotNormal')
-      self.bn_B = tf.keras.layers.BatchNormalization()
-
-      # third layer
-      if use_kernel_reg:
-         self.conv2d_C = tf.keras.layers.Conv2D(1024,[1,1],
-                           padding='valid',
-                           strides=[1,1],
-                           kernel_initializer='GlorotNormal',
-                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      else:
-         self.conv2d_C = tf.keras.layers.Conv2D(1024,[1,1],
-                           padding='valid',
-                           strides=[1,1],
-                           kernel_initializer='GlorotNormal')
-      self.bn_C = tf.keras.layers.BatchNormalization()
-      self.max_pool2d_C = tf.keras.layers.MaxPool2D(pool_size=[self.num_points,1],strides=[2,2])
-
-      # fourth layer
-
-      if use_kernel_reg:
-         self.dense_D = tf.keras.layers.Dense(512,kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      else:
-         self.dense_D = tf.keras.layers.Dense(512)
-      self.bn_D = tf.keras.layers.BatchNormalization()
-      # fifth layer
-
-      if use_kernel_reg:
-         self.dense_E = tf.keras.layers.Dense(256,kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      else:
-         self.dense_E = tf.keras.layers.Dense(256)
-      self.bn_E = tf.keras.layers.BatchNormalization()
-
-      # sixth layer
-      self.const_init = tf.constant_initializer(0.0)
-      self.input_transform_weights = tf.Variable(self.const_init([256,self.nfeatures * self.nfeatures],dtype=tf.float32),name='input_transform_weights')
-      self.input_transform_biases = tf.Variable(self.const_init([self.nfeatures * self.nfeatures],dtype=tf.float32),name='input_transform_biases')
-      self.input_transform_biases.assign_add(tf.constant(np.eye(self.nfeatures).flatten(), dtype=tf.float32))
-
-   def call(self,edge_feature,point_cloud,training=False):
+   def call(self,edge_feature,training=False):
 
       # first layer
-      net = self.conv2d_A(edge_feature)
-      net = self.bn_A(net,training)
-      net = self.relu(net)
-
-      # second layer
-      net = self.conv2d_B(net)
-      net = self.bn_B(net,training)
-      net = self.relu(net)
-
+      net = self.conv2d_A(edge_feature,training)
+      net = self.conv2d_B(net,training)
       net = tf.reduce_max(net, axis=-2, keepdims=True)
-
-      # third layer
-      net = self.conv2d_C(net)
-      net = self.bn_C(net,training)
-      net = self.relu(net)
+      net = self.conv2d_C(net,training)
       net = self.max_pool2d_C(net)
 
       net = tf.reshape(net, [self.batch_size, -1])
 
-      # fourth layer
-      net = self.dense_D(net)
-      net = self.bn_D(net,training)
-      net = self.relu(net)
-
-      # fifth layer
-      net = self.dense_E(net)
-      net = self.bn_E(net,training)
-      net = self.relu(net)
+      net = self.dense_D(net,training)
+      net = self.dense_E(net,training)
 
       # build transformation
       transform = tf.matmul(net, self.input_transform_weights)
       transform = tf.nn.bias_add(transform, self.input_transform_biases)
       transform = tf.reshape(transform, [self.batch_size, self.nfeatures, self.nfeatures])
-
       return transform
 
 
@@ -135,171 +206,72 @@ class DGCNN(tf.keras.Model):
       self.batch_size = config['data']['batch_size']
       self.num_points = config['data']['num_points']
       
-      self.transform = InputTransformNet(config,self.num_features,use_kernel_reg)
-
-      if self.use_kernel_reg:
-         self.conv2d_A = tf.keras.layers.Conv2D(self.conv2d_size,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal',
-                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
+      if use_kernel_reg:
+         kernel_regularizer = tf.keras.regularizers.L2(1e-3)
       else:
-         self.conv2d_A = tf.keras.layers.Conv2D(self.conv2d_size,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal')
+         kernel_regularizer = None
 
-      self.bn_A = tf.keras.layers.BatchNormalization()
-      self.relu = tf.keras.layers.ReLU()
+      self.input_edge = EdgeLayer(self.knn_k)
+      self.transform = InputTransformNet(config,use_kernel_reg)
 
-      if self.use_kernel_reg:
-         self.conv2d_B = tf.keras.layers.Conv2D(self.conv2d_size,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal',
-                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      else:
-         self.conv2d_B = tf.keras.layers.Conv2D(self.conv2d_size,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal')
-      self.bn_B = tf.keras.layers.BatchNormalization()
+      self.edge_A   = EdgeLayer(self.knn_k)
+      self.conv2d_A = ConvBnLayer(self.conv2d_size,kernel_regularizer=kernel_regularizer)
+      self.conv2d_B = ConvBnLayer(self.conv2d_size,kernel_regularizer=kernel_regularizer)
+      # reduce_max
 
-      if self.use_kernel_reg:
-         self.conv2d_C = tf.keras.layers.Conv2D(self.conv2d_size,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal',
-                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      else:
-         self.conv2d_C = tf.keras.layers.Conv2D(self.conv2d_size,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal')
-      self.bn_C = tf.keras.layers.BatchNormalization()
+      self.edge_C   = EdgeLayer(self.knn_k)
+      self.conv2d_C = ConvBnLayer(self.conv2d_size,kernel_regularizer=kernel_regularizer)
+      self.conv2d_D = ConvBnLayer(self.conv2d_size,kernel_regularizer=kernel_regularizer)
+      # reduce_max
 
-      
-      if self.use_kernel_reg:
-         self.conv2d_D = tf.keras.layers.Conv2D(self.conv2d_size,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal',
-                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      else:
-         self.conv2d_D = tf.keras.layers.Conv2D(self.conv2d_size,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal')
-      self.bn_D = tf.keras.layers.BatchNormalization()
+      self.edge_E   = EdgeLayer(self.knn_k)
+      self.conv2d_E = ConvBnLayer(self.conv2d_size,kernel_regularizer=kernel_regularizer)
 
-      if self.use_kernel_reg:
-         self.conv2d_E = tf.keras.layers.Conv2D(self.conv2d_size,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal',
-                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      else:
-         self.conv2d_E = tf.keras.layers.Conv2D(self.conv2d_size,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal')
-      self.bn_E = tf.keras.layers.BatchNormalization()
+      self.conv2d_F = ConvBnLayer(1024,kernel_regularizer=kernel_regularizer)
 
-      # if use_kernel_reg:
-      #    self.conv2d_EE = tf.keras.layers.Conv2D(self.conv2d_size,[1,1],padding='valid',strides=[1,1],
-      #                      kernel_initializer='GlorotNormal',
-      #                      kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      # else:
-      #    self.conv2d_EE = tf.keras.layers.Conv2D(self.conv2d_size,[1,1],padding='valid',strides=[1,1],
-      #                      kernel_initializer='GlorotNormal')
-      # self.bn_EE = tf.keras.layers.BatchNormalization()
+      # max pool in build
 
-      if self.use_kernel_reg:
-         self.conv2d_F = tf.keras.layers.Conv2D(1024,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal',
-                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      else:
-         self.conv2d_F = tf.keras.layers.Conv2D(1024,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal')
-      self.bn_F = tf.keras.layers.BatchNormalization()
-
-      self.max_pool2d_F = tf.keras.layers.MaxPool2D(pool_size=[self.num_points,1],strides=[2,2])
-
-      if self.use_kernel_reg:
-         self.conv2d_G = tf.keras.layers.Conv2D(256,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal',
-                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      else:
-         self.conv2d_G = tf.keras.layers.Conv2D(256,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal')
-
+      self.conv2d_G = ConvBnLayer(256,kernel_regularizer=kernel_regularizer)
       self.dropout_G = tf.keras.layers.Dropout(self.dropout)
 
-      if self.use_kernel_reg:
-         self.conv2d_H = tf.keras.layers.Conv2D(256,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal',
-                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      else:
-         self.conv2d_H = tf.keras.layers.Conv2D(256,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal')
-
+      self.conv2d_H = ConvBnLayer(256,kernel_regularizer=kernel_regularizer)
       self.dropout_H = tf.keras.layers.Dropout(self.dropout)
-      
-      if self.use_kernel_reg:
-         self.conv2d_I = tf.keras.layers.Conv2D(128,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal',
-                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      else:
-         self.conv2d_I = tf.keras.layers.Conv2D(128,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal')
 
-      if self.use_kernel_reg:
-         self.conv2d_J = tf.keras.layers.Conv2D(self.num_classes,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal',
-                           kernel_regularizer=tf.keras.regularizers.L2(1e-3))
-      else:
-         self.conv2d_J = tf.keras.layers.Conv2D(self.num_classes,[1,1],padding='valid',strides=[1,1],
-                           kernel_initializer='GlorotNormal')
+      self.conv2d_I = ConvBnLayer(128,kernel_regularizer=kernel_regularizer)
+      self.conv2d_J = ConvBnLayer(self.num_classes,kernel_regularizer=kernel_regularizer,activation=None)
    
-   def call(self, point_cloud, training):
+   def build(self,input_shape):
+      batch_size,num_points,nfeatures = input_shape
 
+      self.max_pool2d_F = tf.keras.layers.MaxPool2D(pool_size=[num_points,1],strides=[2,2])
+      self.num_points = num_points
+      self.batch_size = batch_size
+      self.nfeatures = nfeatures
+
+   def call(self, point_cloud, training):
+      # point_cloud shape: [batch,points,features]
       # calculate edge features of the graph
-      adj = self.pairwise_distance(point_cloud)
-      nn_idx = self.knn(adj, k=self.knn_k)
-      input_image = tf.expand_dims(point_cloud, -1)
-      edge_feature = self.get_edge_feature(input_image, nn_idx=nn_idx, k=self.knn_k)
       
+      edge_feature = self.input_edge(point_cloud)
       transform = self.transform(edge_feature, training)
       point_cloud_transformed = tf.matmul(point_cloud, transform)
 
-      input_image = tf.expand_dims(point_cloud_transformed, -1)
-      adj = self.pairwise_distance(point_cloud_transformed)
-      nn_idx = self.knn(adj, k=self.knn_k)
-      edge_feature = self.get_edge_feature(input_image, nn_idx=nn_idx, k=self.knn_k)
-
+      edge_feature = self.edge_A(point_cloud_transformed)
       net1 = self.conv2d_A(edge_feature)
-      net1 = self.bn_A(net1,training)
-      net1 = self.relu(net1)
-      
       net1 = self.conv2d_B(net1)
-      net1 = self.bn_B(net1,training)
-      net1 = self.relu(net1)
-
       net1 = tf.reduce_max(net1, axis=-2, keepdims=True)
 
-      adj = self.pairwise_distance(net1)
-      nn_idx = self.knn(adj, k=self.knn_k)
-      edge_feature = self.get_edge_feature(net1, nn_idx=nn_idx, k=self.knn_k)
-
+      edge_feature = self.edge_C(net1)
       net2 = self.conv2d_C(edge_feature)
-      net2 = self.bn_C(net2,training)
-      net2 = self.relu(net2)
-      
       net2 = self.conv2d_D(net2)
-      net2 = self.bn_D(net2,training)
-      net2 = self.relu(net2)
-
       net2 = tf.reduce_max(net2, axis=-2, keepdims=True)
 
-      adj = self.pairwise_distance(net2)
-      nn_idx = self.knn(adj, k=self.knn_k)
-      edge_feature = self.get_edge_feature(net2, nn_idx=nn_idx, k=self.knn_k)
-
+      edge_feature = self.edge_C(net2)
       net3 = self.conv2d_E(edge_feature)
-      net3 = self.bn_E(net3,training)
-      net3 = self.relu(net3)
-
-      # net3 = self.conv2d_EE(net3)
-      # net3 = self.bn_EE(net3,training)
-      # net3 = self.relu(net3)
-      
       net3 = tf.reduce_max(net3, axis=-2, keepdims=True)
 
       combo_features = tf.concat([net1,net2,net3],axis=-1)
       net = self.conv2d_F(combo_features)
-      net = self.bn_F(net,training)
-      net = self.relu(net)
-
       net = self.max_pool2d_F(net)
 
       net = tf.tile(net, [1,self.num_points,1,1])
@@ -316,82 +288,9 @@ class DGCNN(tf.keras.Model):
 
       net = self.conv2d_J(net)
 
-      net = tf.reshape(net,[self.batch_size,self.num_points,self.num_classes])
+      net = tf.squeeze(net)
       
       return net
 
-   @staticmethod
-   def pairwise_distance(point_cloud):
-      """Compute pairwise distance of a point cloud.
-
-         Args:
-          point_cloud: tensor (batch_size, num_points, num_dims)
-
-         Returns:
-          pairwise distance: (batch_size, num_points, num_points)
-      """
-      og_batch_size = point_cloud.shape[0]
-      point_cloud = tf.squeeze(point_cloud)
-      if og_batch_size == 1:
-         point_cloud = tf.expand_dims(point_cloud, 0)
-      
-      # batch-wise sqaure, transpose point_cloud like (0,2,1), then multiply
-      point_cloud_inner = -2 * tf.matmul(point_cloud, point_cloud, transpose_b=True)
-      point_cloud_square = tf.reduce_sum(tf.square(point_cloud), axis=-1, keepdims=True)
-      point_cloud_square_tranpose = tf.transpose(point_cloud_square, perm=[0, 2, 1])
-      return point_cloud_square + point_cloud_inner + point_cloud_square_tranpose
-
-   @staticmethod
-   def knn(adj_matrix, k=20, returnDist=False):
-      """Get KNN based on the pairwise distance.
-      Args:
-       pairwise distance: (batch_size, num_points, num_points)
-       k: int
-
-      Returns:
-       nearest neighbors: (batch_size, num_points, k)
-      """
-      dist, nn_idx = tf.math.top_k(tf.negative(adj_matrix), k=tf.cast(k,tf.int32))
-      if not returnDist:
-         return nn_idx
-      else:
-         return nn_idx, dist
-
-   @staticmethod
-   def get_edge_feature(point_cloud, nn_idx, k=20,concat=True):
-      """Construct edge feature for each point
-      Args:
-       point_cloud: (batch_size, num_points, 1, num_dims)
-       nn_idx: (batch_size, num_points, k)
-       k: int
-
-      Returns:
-       edge features: (batch_size, num_points, k, num_dims)
-      """
-      og_batch_size = point_cloud.shape[0]
-      point_cloud = tf.squeeze(point_cloud)
-      if og_batch_size == 1:
-         point_cloud = tf.expand_dims(point_cloud, 0)
-
-      point_cloud_central = point_cloud
-
-      # shape = [batch_size]
-      idx_ = tf.range(point_cloud.shape[0]) * point_cloud.shape[1]
-      # shape = [batch_size,1,1]
-      idx_ = tf.reshape(idx_, [point_cloud.shape[0], 1, 1])
-
-      # shape = [batch_size*num_points,nfeatures]
-      point_cloud_flat = tf.reshape(point_cloud, [-1, point_cloud.shape[2]])
-      # shape = [batch_size*num_points,nfeatures]
-      point_cloud_neighbors = tf.gather(point_cloud_flat, nn_idx + idx_)
-      point_cloud_central = tf.expand_dims(point_cloud_central, axis=-2)
-
-      point_cloud_central = tf.tile(point_cloud_central, [1, 1, k, 1])
-
-      if concat:
-         edge_feature = tf.concat([point_cloud_central, point_cloud_neighbors - point_cloud_central], axis=-1)
-         return edge_feature
-      else:
-         return point_cloud_neighbors
 
 

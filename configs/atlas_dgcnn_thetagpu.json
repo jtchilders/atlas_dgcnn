@@ -3,17 +3,22 @@
       "name":                          "dgcnn",
       "knn":                           20,
       "conv2d_size":                   64,
-      "dropout":                       0.6,
-      "use_kernel_reg":                false
+      "dropout":                       0.3,
+      "use_kernel_reg":                true
    },
    "optimizer": {
-      "name":                          "Adam"
+      "name":                          "Adam",
+      "args": {
+         "beta_1":                     0.9,
+         "beta_2":                     0.999,
+         "epsilon":                    1e-06
+      }
    },
    "lr_schedule": {
       "args": {
+         "decay_rate":                 0.8,
+         "decay_steps":                25000,
          "initial_learning_rate":      0.001,
-         "decay_rate":                 0.75,
-         "decay_steps":                15000,
          "staircase":                  true
       },
       "name": "ExponentialDecay"
@@ -40,10 +45,11 @@
       "num_features":                  7,
       "num_classes":                   3,
       "num_channels":                  3,
-      "num_points":                    15000
+      "num_points":                    15000,
+      "augment":                       true
    },
    "training": {
-      "epochs":                        500,
+      "epochs":                        200,
       "status":                        10
    },
    "validation": {

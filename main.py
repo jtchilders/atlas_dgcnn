@@ -10,6 +10,7 @@ from tensorflow.keras.mixed_precision import experimental as mixed_precision
 import data_handler
 import model,lr_func,losses,accuracies
 import sklearn.metrics
+import epoch_loop
 logger = logging.getLogger(__name__)
 DEFAULT_CONFIG = 'config.json'
 DEFAULT_INTEROP = int(os.cpu_count() / 4)
@@ -106,6 +107,9 @@ def main():
    config = json.load(open(args.config_filename))
    # config['device'] = device_str
    
+   config['profrank'] = args.profrank
+   config['profiler'] = args.profiler
+   config['logdir'] = args.logdir
    config['rank'] = rank
    config['nranks'] = nranks
    config['evaluate'] = False
@@ -147,6 +151,9 @@ def main():
 
    train_summary_writer = None
    test_summary_writer = None
+   test_jet_writer = None
+   test_ele_writer = None
+   test_bkg_writer = None
    if rank == 0:
       train_summary_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'train')
       test_summary_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'test')
@@ -167,6 +174,7 @@ def main():
    batch_size = config['data']['batch_size']
    num_points = config['data']['num_points']
    num_classes = config['data']['num_classes']
+   softmax = tf.keras.layers.Softmax()
    for epoch_num in range(config['training']['epochs']):
       
       logger.info('begin epoch %s',epoch_num)
@@ -176,96 +184,24 @@ def main():
       confusion_matrix = None
       batch_num = 0.
       if not config['evaluate']:
-         loss,acc,confusion_matrix,batch_num,batches_per_epoch = train_one_epoch(config,trainds,net,
+         loss,acc,confusion_matrix,batch_num,batches_per_epoch = \
+               epoch_loop.one_train_epoch(config,trainds,net,
                                  loss_func,opt,epoch_num,train_summary_writer,
-                                 batches_per_epoch,
-                                 args.profiler,args.profrank,args.logdir)
+                                 batches_per_epoch)
+
+      loss,acc,confusion_matrix,batch_num,batches_per_epoch = \
+            epoch_loop.one_eval_epoch(config,testds,net,
+                                 loss_func,opt,epoch_num,test_summary_writer,
+                                 batches_per_epoch,test_jet_writer,
+                                 test_ele_writer,test_bkg_writer)
       
-      total_loss = 0.
-      total_correct = 0.
-      total_nonzero = 0.
-      test_confusion_matrix = np.zeros([num_classes,num_classes])
-      test_num = 0.
-      total_iou = np.zeros(num_classes)
-      for inputs,labels,class_weights,nonzero_mask in testds:
-         # logger.info('inputs: %s labels: %s class_weights: %s',inputs.shape,labels.shape,class_weights.shape)
-         loss_value,pred = test_step(net,loss_func,inputs,labels,nonzero_mask)
-         
-         nonzero_mask = tf.cast(nonzero_mask,tf.int32)
-         nonzero = tf.math.reduce_sum(nonzero_mask).numpy()
-         
-         all_loss = loss_value
-         if hvd:
-            all_loss = hvd.allreduce(all_loss)
-         
-         total_loss += all_loss
-
-         pred = tf.cast(tf.argmax(pred,-1,),tf.int32)
-         correct = tf.math.reduce_sum(nonzero_mask * tf.cast(tf.math.equal(pred,labels),tf.int32))
-
-         all_correct = correct
-         all_nonzero = nonzero
-         all_iou = get_iou(labels,pred,num_classes,nonzero_mask)
-         all_iou[np.isnan(all_iou)] = 0.
-         if hvd:
-            all_correct = hvd.allreduce(all_correct,op=hvd.mpi_ops.Sum)
-            all_nonzero = hvd.allreduce(all_nonzero,op=hvd.mpi_ops.Sum)
-            all_iou = hvd.allreduce(all_iou,op=hvd.mpi_ops.Sum)
-         total_nonzero += all_nonzero.numpy()
-         total_correct += all_correct.numpy()
-         total_iou += all_iou.numpy()
-         
-         all_confusion_matrix = sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=nonzero_mask.numpy().flatten(),normalize='true')
-         if hvd:
-            all_confusion_matrix = hvd.allreduce(all_confusion_matrix)
-
-         test_confusion_matrix += all_confusion_matrix
-
-         if test_num > 0 and test_num % status_count == 0:
-            test_loss = total_loss / test_num
-            test_accuracy = total_correct / total_nonzero
-            logger.info(' [%5d:%5d]: test loss = %10.5f  test acc = %10.5f',
-                        epoch_num,test_num,test_loss,test_accuracy)
-         test_num += 1
-
-      if rank == 0:
-         test_loss = total_loss / test_num
-         test_accuracy = total_correct / total_nonzero
-         test_iou = total_iou / test_num / nranks
-         template = 'Epoch {:10d}, Loss: {:10.5f}, Accuracy: {:10.5f}, Test Loss: {:10.5f}, Test Accuracy: {:10.5f}'
-         logger.info(template.format(epoch_num + 1,
-                               loss,
-                               acc,
-                               test_loss,
-                               test_accuracy))
-         
-         with test_summary_writer.as_default():
-            step = epoch_num * batches_per_epoch + batch_num
-            if step == 0:
-               step = 1
-            tf.summary.scalar('metrics/loss', test_loss, step=step)
-            tf.summary.scalar('metrics/accuracy', test_accuracy, step=step)
-         with test_jet_writer.as_default():
-            tf.summary.scalar('metrics/iou',test_iou[0],step=step)
-         with test_ele_writer.as_default():
-            tf.summary.scalar('metrics/iou',test_iou[1],step=step)
-         with test_bkg_writer.as_default():
-            tf.summary.scalar('metrics/iou',test_iou[2],step=step)
-         
-         test_confusion_matrix = test_confusion_matrix.numpy() / test_num
-         logger.info('Train Confusion Matrix: \n %s',confusion_matrix)
-         logger.info('Test  Confusion Matrix: \n %s',test_confusion_matrix)
-         logger.info('Test IOU: %s',test_iou)
-         if confusion_matrix is not None:
-            json.dump(confusion_matrix.tolist(),open(os.path.join(args.logdir,f'epoch{epoch_num+1:03d}_confustion_matrix_train.json'),'w'))
-         json.dump(test_confusion_matrix.tolist(),open(os.path.join(args.logdir,f'epoch{epoch_num+1:03d}_confustion_matrix_test.json'),'w'))
-         net.save_weights(os.path.join(args.logdir,f'epoch{epoch_num+1:03d}_model_weights.ckpt'))
+      
 
 
 def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,
                     batches_per_epoch,profiler=None,profrank=0,logdir=None):
 
-   first_batch = True
+   first_batch    = (epoch_num == 0)
    status_count   = config['training']['status']
    batch_size     = config['data']['batch_size']
    num_points     = config['data']['num_points']
@@ -274,6 +210,7 @@ def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,
    batch_num      = 0
    start          = time.time()
    train_loss_metric = 0
+   softmax        = tf.keras.layers.Softmax()
 
    # used for ongoing image rate calculation
    image_rate_sum = 0.
@@ -315,7 +252,7 @@ def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,
       # average loss value over batches for status message
       train_loss_metric += loss_value
       
-      pred = tf.cast(tf.argmax(pred,-1,),tf.int32)
+      pred = tf.cast(tf.argmax(softmax(pred),-1,),tf.int32)
       correct = tf.math.reduce_sum(class_weights * tf.cast(tf.math.equal(pred,labels),tf.int32))
       
       confusion_matrix += sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=class_weights.numpy().flatten(),normalize='true')
@@ -377,58 +314,6 @@ def train_one_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,
    return loss,acc,confusion_matrix,batch_num,batches_per_epoch
 
 
-@tf.function
-def train_step(net,loss_func,opt,inputs,labels,first_batch=False,hvd=None,class_weights=None,root_rank=0):
-   
-   with tf.GradientTape() as tape:
-      # tf.print(':%05d: in gradtape' % hvd.rank())
-      pred = net(inputs, training=True)
-      # # pred shape: [batches,points,classes]
-      # # labels shape: [batches,points]
-      # loss_value = loss_func(labels, pred)
-      # # loss_value shape: [batches,points]
-      # class_weights = tf.cast(class_weights,tf.float32)
-      # loss_value *= class_weights
-      # # loss_value shape: [batches,points]
-      # loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(class_weights,out_type=tf.float32) / tf.math.reduce_sum(class_weights))
-      # # loss_value shape: [1]
-
-      targets = tf.cast(tf.one_hot(labels,3),tf.float32)
-      totalweights = tf.expand_dims(tf.cast(class_weights,tf.float32),axis=2)
-      loss_value = tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(labels=targets,logits=pred,pos_weight=totalweights))
-   
-   if hvd:
-      tape = hvd.DistributedGradientTape(tape)
-   grads = tape.gradient(loss_value, net.trainable_variables)
-   opt.apply_gradients(zip(grads, net.trainable_variables))
-   # Horovod: broadcast initial variable states from rank 0 to all other processes.
-   # This is necessary to ensure consistent initialization of all workers when
-   # training is started with random weights or restored from a checkpoint.
-   #
-   # Note: broadcast should be done after the first gradient step to ensure optimizer
-   # initialization.
-   if hvd and first_batch:
-      hvd.broadcast_variables(net.variables, root_rank=root_rank)
-      hvd.broadcast_variables(opt.variables(), root_rank=root_rank)
-   
-   return loss_value,pred
-
-
-@tf.function
-def test_step(net,loss_func,inputs,labels,class_weights):
-   # training=False is only needed if there are layers with different
-   # behavior during training versus inference (e.g. Dropout).
-   pred = net(inputs, training=False)
-
-   # loss_value = loss_func(labels, pred)
-   # class_weights = tf.cast(class_weights,tf.float32)
-   # loss_value *= class_weights
-   # loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(class_weights,out_type=tf.float32) / tf.math.reduce_sum(class_weights))
-   targets = tf.cast(tf.one_hot(labels,3),tf.float32)
-   totalweights = tf.expand_dims(tf.cast(class_weights,tf.float32),axis=2)
-   loss_value = tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(labels=targets,logits=pred,pos_weight=totalweights))
-   return loss_value,pred
-
 
 def get_optimizer(config):
 
@@ -478,35 +363,6 @@ def get_optimizer(config):
    else:
       raise Exception('could not locate optimizer %s',opt_name)
 
-
-def get_iou(truth,pred,num_classes,mask):
-   # truth shape: [batch,points]
-   # pred shape: [batch,points]
-   # mask shape: [batch,points]
-   # num_classes = int
-   # empty holder of output
-   iou = np.zeros(num_classes)
-   # loop over classes
-   for i in range(num_classes):
-      # truth entries equal to this class label
-      truth_classes = tf.math.equal(truth,i)
-      # logger.info('class %d truth_classes: %s',i,tf.math.reduce_sum(tf.cast(truth_classes,tf.int32)))
-      # prediction entries equal to this class label
-      pred_classes  = tf.math.equal(pred,i)
-      # logger.info('class %d pred_classes: %s',i,tf.math.reduce_sum(tf.cast(pred_classes,tf.int32)))
-      
-      # (truth_classes == pred_classes) * mask
-      intersection = tf.cast(tf.math.logical_and(truth_classes,pred_classes),tf.int32) * mask
-      intersection = tf.math.reduce_sum(intersection)
-      # logger.info('class %d intersection: %s',i,intersection)
-
-      # (truth_classes || pred_classes) * mask
-      union = tf.cast(tf.math.logical_or(truth_classes,pred_classes),tf.int32) * mask
-      union = tf.math.reduce_sum(union)
-      # logger.info('class %d union: %s',i,union)
-
-      iou[i] = intersection / union
-   return iou
 
 if __name__ == "__main__":
    main()
