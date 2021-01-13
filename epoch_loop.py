@@ -85,10 +85,7 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
 
       # iou for this batch
       iou = get_iou(labels,pred,num_classes,weights)
-      # logger.error('weights %s',np.unique(weights,return_counts=True))
-      # logger.error('labels %s',np.unique(labels,return_counts=True))
-      # logger.error('pred %s',np.unique(pred,return_counts=True))
-      # logger.error('iou = %s',iou)
+
       # confusion matrix for this batch
       confusion_matrix = sklearn.metrics.confusion_matrix(labels.numpy().flatten(),pred.numpy().flatten(),sample_weight=weights.numpy().flatten())
 
@@ -218,9 +215,7 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
 def train_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd=None,root_rank=0):
    
    with tf.GradientTape() as tape:
-      # tf.print(':%05d: in gradtape' % hvd.rank())
       logits = net(inputs, training=True)
-      # tf.print('logits = ',logits)
       # pred shape: [batches,points,classes]
       # labels shape: [batches,points]
       loss_value = loss_func(labels, logits)
@@ -232,14 +227,9 @@ def train_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hv
       loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(weights,out_type=tf.float32) / tf.math.reduce_sum(weights))
       # loss_value shape: [1]
 
-      # tf.print('net losses shape = ',len(net.losses),'and value',net.losses)
-      regularization_losses = tf.reduce_sum(net.losses)
+      # regularization_losses = tf.reduce_sum(net.losses)
 
-      loss_value += regularization_losses
-
-      # targets = tf.cast(tf.one_hot(labels,3),tf.float32)
-      # totalweights = tf.expand_dims(tf.cast(weights,tf.float32),axis=2)
-      # loss_value = tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(labels=targets,logits=logits,pos_weight=totalweights))
+      # loss_value += regularization_losses
    
    if hvd:
       tape = hvd.DistributedGradientTape(tape)
@@ -263,7 +253,6 @@ def test_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd
    # training=False is only needed if there are layers with different
    # behavior during training versus inference (e.g. Dropout).
    logits = net(inputs, training=False)
-   # tf.print('logits = ',logits)
    # run loss function
    loss_value = loss_func(labels, logits)
    # cast to float for calculations
@@ -273,14 +262,10 @@ def test_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd
    # reduce by mean and scale by the number of non-zero points
    loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(weights,out_type=tf.float32) / tf.math.reduce_sum(weights))
    
-   # tf.print('net losses shape = ',len(net.losses),'and value',net.losses)
-   regularization_losses = tf.reduce_sum(net.losses )
+   # regularization_losses = tf.reduce_sum(net.losses )
 
-   loss_value += regularization_losses
+   # loss_value += regularization_losses
    
-   # targets = tf.cast(tf.one_hot(labels,3),tf.float32)
-   # totalweights = tf.expand_dims(tf.cast(weights,tf.float32),axis=2)
-   # loss_value = tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(labels=targets,logits=logits,pos_weight=totalweights))
    return loss_value,logits
 
 

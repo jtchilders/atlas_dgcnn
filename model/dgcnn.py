@@ -27,9 +27,7 @@ class ConvBnLayer(tf.keras.layers.Layer):
 
    def call(self,inputs,training=False):
       conv = self.conv(inputs)
-      # tf.print(self.name,'conv = ',conv.shape,tf.reduce_sum(conv),tf.reduce_mean(conv),conv[0,0:10,0,0])
       bn = self.bn(conv,training=training)
-      # tf.print(self.name,'bn = ',bn.shape,tf.reduce_sum(bn),tf.reduce_mean(bn),bn[0,0:10,0,0])
       if self.activ:
          return self.activ(bn)
       else:
@@ -53,9 +51,7 @@ class DenseBnLayer(tf.keras.layers.Layer):
 
    def call(self,inputs,training=False):
       dense = self.dense(inputs)
-      # tf.print(self.name,'dense = ',dense.shape,tf.reduce_sum(dense),tf.reduce_mean(dense),dense[0,0:10])
       bn = self.bn(dense,training=training)
-      # tf.print(self.name,'bn = ',bn.shape,tf.reduce_sum(bn),tf.reduce_mean(bn),bn[0,0:10])
       if self.activ:
          return self.activ(bn)
       else:
@@ -275,55 +271,27 @@ class DGCNN(tf.keras.Model):
    def call(self, point_cloud, training):
       # point_cloud shape: [batch,points,features]
       # calculate edge features of the graph
-      # tf.print('point_cloud = ',point_cloud.shape,tf.reduce_sum(point_cloud),tf.reduce_mean(point_cloud))
       edge_feature = self.input_edge(point_cloud,training)
-      # tf.print('edge_feature = ',edge_feature.shape,tf.reduce_sum(edge_feature),tf.reduce_mean(edge_feature))
       transform = self.transform(edge_feature, training)
-      # tf.print('transform = ',transform.shape,tf.reduce_sum(transform),tf.reduce_mean(transform))
       point_cloud_transformed = tf.matmul(point_cloud, transform)
-      # tf.print('point_cloud_transformed = ',point_cloud_transformed.shape,tf.reduce_sum(point_cloud_transformed),tf.reduce_mean(point_cloud_transformed))
 
       edge_feature = self.edge_A(point_cloud_transformed,training)
-      x = edge_feature
-      # tf.print('edge_feature = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
       net1 = self.conv2d_A(edge_feature,training)
-      x = net1
-      # tf.print('net1 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
       net1 = self.conv2d_B(net1,training)
-      x = net1
-      # tf.print('net1 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
       net1 = tf.reduce_max(net1, axis=-2, keepdims=True)
-      x = net1
-      # tf.print('net1 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
 
       edge_feature = self.edge_C(net1,training)
-      x = edge_feature
-      # tf.print('edge_feature = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
       net2 = self.conv2d_C(edge_feature,training)
-      x = net2
-      # tf.print('net2 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
       net2 = self.conv2d_D(net2,training)
-      x = net2
-      # tf.print('net2 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
       net2 = tf.reduce_max(net2, axis=-2, keepdims=True)
-      x = net2
-      # tf.print('net2 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
 
       edge_feature = self.edge_C(net2,training)
-      x = edge_feature
-      # tf.print('edge_feature = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
       net3 = self.conv2d_E(edge_feature,training)
-      x = net3
-      # tf.print('net3 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
       net3 = tf.reduce_max(net3, axis=-2, keepdims=True)
-      x = net3
-      # tf.print('net3 = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
 
       combo_features = tf.concat([net1,net2,net3],axis=-1)
       net = self.conv2d_F(combo_features,training)
       net = self.max_pool2d_F(net)
-      x = net
-      # tf.print('net = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
 
       net = tf.tile(net, [1,self.num_points,1,1])
 
@@ -331,25 +299,18 @@ class DGCNN(tf.keras.Model):
 
       net = self.conv2d_G(net,training)
       net = self.dropout_G(net,training=training)
-      x = net
-      # tf.print('net = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
 
       net = self.conv2d_H(net,training)
       net = self.dropout_H(net,training=training)
-      x = net
-      # tf.print('net = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
 
       net = self.conv2d_I(net,training)
-      x = net
-      # tf.print('net = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10,0,0])
 
-      net = self.conv2d_J(net)
-      x = net
-      # tf.print('net = ',x.shape,tf.reduce_sum(x),tf.reduce_mean(x),x[0,0:10])
-
-      net = tf.squeeze(net)
+      # this layer is ONLY a Conv2D
+      logits = self.conv2d_J(net)
+      # go from [batch,points,1,classes] to [batch,points,classes]
+      logits = tf.squeeze(logits)
       
-      return net
+      return logits
 
 
 
