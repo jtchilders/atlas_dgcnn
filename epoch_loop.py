@@ -34,6 +34,7 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
    softmax        = tf.keras.layers.Softmax()
 
    # create status monitoring variables
+   total_loss     = CalcMean()
    status_loss    = CalcMean()
    # used for ongoing image rate calculation
    image_rate     = CalcMean()
@@ -80,6 +81,11 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
 
       # convert logits to predicted class
       pred = tf.cast(tf.argmax(softmax(logits),-1,),tf.int32)
+
+      # logger.info('labels: %s %s',labels.shape,np.unique(labels,return_counts=True))
+      # logger.info('pred: %s %s',pred.shape,np.unique(pred,return_counts=True))
+      # logger.info('weights: %s %s',weights.shape,np.unique(weights,return_counts=True))
+
       # count how many predictions were correct, weighted for balance
       correct = tf.math.reduce_sum(weights * tf.cast(tf.math.equal(pred,labels),tf.int32))
 
@@ -138,6 +144,7 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
          total_nonzero           += status_nonzero
          total_iou               += status_iou
          total_confusion_matrix  += status_confusion_matrix
+         total_loss              += status_loss
 
          logger.info(" [%5d:%5d]: %s loss = %10.5f +/- %10.5f acc = %10.5f  imgs/sec = %7.1f +/- %7.1f",
                      epoch_num,batch_num,training_str,status_loss.mean(),
@@ -191,7 +198,7 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
          step = epoch_num * batches_per_epoch + batch_num
          with tbwriter.as_default():
             #tf.summary.experimental.set_step(step)
-            tf.summary.scalar('metrics/loss', status_loss.mean(),step=step)
+            tf.summary.scalar('metrics/loss', total_loss.mean(),step=step)
             tf.summary.scalar('metrics/accuracy', acc,step=step)
          with jet_writer.as_default():
             tf.summary.scalar('metrics/iou',total_iou[0],step=step)
@@ -227,9 +234,10 @@ def train_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hv
       loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(weights,out_type=tf.float32) / tf.math.reduce_sum(weights))
       # loss_value shape: [1]
 
-      # regularization_losses = tf.reduce_sum(net.losses)
+      # include regularization losses
+      loss_value += tf.reduce_sum(net.losses)
 
-      # loss_value += regularization_losses
+      # tf.print('net.losses',net.losses)
    
    if hvd:
       tape = hvd.DistributedGradientTape(tape)
@@ -262,9 +270,8 @@ def test_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd
    # reduce by mean and scale by the number of non-zero points
    loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(weights,out_type=tf.float32) / tf.math.reduce_sum(weights))
    
-   # regularization_losses = tf.reduce_sum(net.losses )
-
-   # loss_value += regularization_losses
+   # include regularization losses
+   loss_value += tf.reduce_sum(net.losses)
    
    return loss_value,logits
 
