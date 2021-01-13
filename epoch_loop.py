@@ -70,9 +70,14 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
       weights = class_weights
       if not training:
          weights = nonzero_mask
+      
+      nonzero_to_class_scaler = 1.
+      if training:
+         nonzero_to_class_scaler =  tf.reduce_sum(tf.cast(nonzero_mask,tf.float32)) / tf.reduce_sum(tf.cast(class_weights,tf.float32))
+      
 
       # run forward/backward pass
-      loss_value,logits = step_func(net,loss_func,inputs,labels,weights,opt,first_batch,hvd)
+      loss_value,logits = step_func(net,loss_func,inputs,labels,weights,opt,first_batch,hvd,nonzero_to_class_scaler)
 
       # cast from int8 to int32 for calculations
       weights = tf.cast(weights,tf.int32)
@@ -195,7 +200,7 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
       total_iou = total_iou / batch_num / nranks
       logger.info('iou = %s',total_iou)
       if not training:
-         step = epoch_num * batches_per_epoch + batch_num
+         step = (epoch_num + 1) * batches_per_epoch
          with tbwriter.as_default():
             #tf.summary.experimental.set_step(step)
             tf.summary.scalar('metrics/loss', total_loss.mean(),step=step)
@@ -219,7 +224,7 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
 
 
 @tf.function
-def train_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd=None,root_rank=0):
+def train_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd=None,scaler=1.,root_rank=0):
    
    with tf.GradientTape() as tape:
       logits = net(inputs, training=True)
@@ -236,6 +241,8 @@ def train_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hv
 
       # include regularization losses
       loss_value += tf.reduce_sum(net.losses)
+
+      loss_value *= scaler
 
       # tf.print('net.losses',net.losses)
    
@@ -257,7 +264,7 @@ def train_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hv
 
 
 @tf.function
-def test_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd=None,root_rank=0):
+def test_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd=None,scaler=1.,root_rank=0):
    # training=False is only needed if there are layers with different
    # behavior during training versus inference (e.g. Dropout).
    logits = net(inputs, training=False)
