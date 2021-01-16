@@ -28,6 +28,7 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
    batch_term     = config['batch_term']
    logdir         = config['logdir']
    hvd            = config.get('hvd',None)
+   balanced       = config['loss']['balanced']
    training_str   = 'training' if training else 'testing'
    
    # used for accuracy check
@@ -67,20 +68,16 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
    for inputs, labels, class_weights, nonzero_mask in dataset:
       
       # set the weights based on training flag
-      weights = class_weights
-      if not training:
+      if training and balanced:
+         weights = class_weights
+         nonzero_to_class_scaler = tf.reduce_sum(tf.cast(nonzero_mask,tf.float32)) / tf.reduce_sum(tf.cast(class_weights,tf.float32))
+      else:
          weights = nonzero_mask
+         nonzero_to_class_scaler = 1.
       
-      nonzero_to_class_scaler = 1.
-      if training:
-         nonzero_to_class_scaler =  tf.reduce_sum(tf.cast(nonzero_mask,tf.float32)) / tf.reduce_sum(tf.cast(class_weights,tf.float32))
-      
-
       # run forward/backward pass
       loss_value,logits = step_func(net,loss_func,inputs,labels,weights,opt,first_batch,hvd,nonzero_to_class_scaler)
 
-      # cast from int8 to int32 for calculations
-      weights = tf.cast(weights,tf.int32)
       # number of non-zero points in this batch
       nonzero = tf.math.reduce_sum(weights)
 
@@ -230,11 +227,11 @@ def train_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hv
       logits = net(inputs, training=True)
       # pred shape: [batches,points,classes]
       # labels shape: [batches,points]
-      loss_value = loss_func(labels, logits)
+      loss_value = loss_func(labels, logits,sample_weight=weights)
+      # tf.print(loss_value.shape)
       # loss_value shape: [batches,points]
-      weights = tf.cast(weights,tf.float32)
       # zero out non useful points
-      loss_value *= weights
+      # loss_value *= weights
       # loss_value shape: [batches,points]
       loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(weights,out_type=tf.float32) / tf.math.reduce_sum(weights))
       # loss_value shape: [1]
@@ -269,11 +266,11 @@ def test_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd
    # behavior during training versus inference (e.g. Dropout).
    logits = net(inputs, training=False)
    # run loss function
-   loss_value = loss_func(labels, logits)
+   loss_value = loss_func(labels, logits,sample_weight=weights)
    # cast to float for calculations
-   weights = tf.cast(weights,tf.float32)
+   # weights = tf.cast(weights,tf.float32)
    # zero out non useful points
-   loss_value *= weights
+   # loss_value *= weights
    # reduce by mean and scale by the number of non-zero points
    loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(weights,out_type=tf.float32) / tf.math.reduce_sum(weights))
    

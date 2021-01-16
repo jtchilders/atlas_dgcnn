@@ -83,11 +83,11 @@ def from_filelist(filelist_filename,config,training=False):
 
 
 def load_csv_file_training(filename):
-   return tf.py_function(load_csv_file_py_training,[filename],[tf.float32,tf.int32,tf.int8,tf.int8])
+   return tf.py_function(load_csv_file_py_training,[filename],[tf.float32,tf.int32,tf.int32,tf.int32])
 
 
 def load_csv_file_testing(filename):
-   return tf.py_function(load_csv_file_py_testing,[filename],[tf.float32,tf.int32,tf.int8,tf.int8])
+   return tf.py_function(load_csv_file_py_testing,[filename],[tf.float32,tf.int32,tf.int32,tf.int32])
 
 
 def load_csv_file_py_training(filename):
@@ -109,10 +109,12 @@ def load_csv_file_py(filename,training=False):
 
    if gconfig['data']['augment'] and training:
       rotation_angle,rotation_matrix = random_rotation()
+      # logger.info('old (x,y,z) = %s  old eta,phi = %s',df[['x','y','z'][0]],df[['eta','phi']])
       df[['x','y','z']] = np.dot(df[['x','y','z']],rotation_matrix)
-      # df['phi'] = df['phi'] + (rotation_angle - np.pi)
-      # df['phi'] = df['phi'].apply(lambda x: x if x < np.pi else x - np.pi)
-
+      df['phi'] = df['phi'] + (rotation_angle - np.pi)
+      df['phi'] = df['phi'].apply(lambda x: x if x < np.pi else x - np.pi)
+      # logger.info('new (x,y,z) = %s  new eta,phi = %s',df[['x','y','z'][0]],df[['eta','phi']])
+      
    # normalize variables
    if False:
       # build the model inputs
@@ -151,18 +153,28 @@ def load_csv_file_py(filename,training=False):
    # use the lowest to decide weights for loss function
    # get list of unique classes and their occurance count
    unique_classes,unique_counts = np.unique(df_labels,return_counts=True)
+   # logger.info('unique_classes = %s',unique_classes)
+   # logger.info('unique_counts = %s',unique_counts)
    # get mininum class occurance count
    min_class_count = np.min(unique_counts)
+   # logger.info('min_class_count = %s',min_class_count)
    # create class weights to be applied to loss as mask
    # this will balance the loss function across classes
-   class_weights = np.zeros([gnum_points],dtype=np.int8)
+   class_weights = np.zeros([gnum_points],dtype=np.int32)
+   # logger.info('class_weights.shape = %s',class_weights.shape)
    # set weights to one for an equal number of classes
    for class_label in unique_classes:
+      # logger.info('class_label = %s',class_label)
       class_indices = np.nonzero(df_labels == class_label)[0]
+      # logger.info('class_indices.shape = %s',class_indices.shape)
       class_indices = np.random.choice(class_indices,size=[min_class_count],replace=False)
+      # logger.info('class_indices.shape = %s',class_indices.shape)
       class_weights[class_indices] = 1
+      # logger.info('class_weights.sum = %s',class_weights.sum())
+      # logger.info('labels_weights.sum = %s',df_labels[class_indices].sum())
+   # logger.info('class_weights unique = %s',np.unique(class_weights,return_counts=True))
 
-   nonzero_mask = np.zeros([gnum_points],dtype=np.int8)
+   nonzero_mask = np.zeros([gnum_points],dtype=np.int32)
    nonzero_mask[0:df_labels.shape[0]] = 1
 
    # pad with zeros or clip some points

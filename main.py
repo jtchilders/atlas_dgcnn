@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 import argparse,logging,json,time,os,sys
-os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '3'
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '4'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '4'
 import numpy as np
 import tensorflow as tf
+import warnings
+warnings.filterwarnings("ignore",category=UserWarning)
 import tensorflow_addons as tfa
 #from tensorflow.python.client import device_lib
 from tensorflow.keras.mixed_precision import experimental as mixed_precision
@@ -206,21 +208,28 @@ def get_optimizer(config):
       lrs_name = config['lr_schedule']['name']
       lrs_args = config['lr_schedule'].get('args',None)
       if hasattr(tf.keras.optimizers.schedules, lrs_name):
-         logger.info('using learning rate schedule %s', lrs_name)
+         logger.info('using tf.keras.optimizers.schedules learning rate schedule %s', lrs_name)
          lr_schedule = getattr(tf.keras.optimizers.schedules, lrs_name)
          if lrs_args:
             lr_schedule = lr_schedule(**lrs_args)
          else:
             raise Exception('missing args for learning rate schedule %s',lrs_name)
       elif lrs_name in globals():
-         logger.info('using learning rate schedule %s', lrs_name)
+         logger.info('using global learning rate schedule %s', lrs_name)
          lr_schedule = globals()[lrs_name]
          if lrs_args:
             lr_schedule = lr_schedule(**lrs_args)
          else:
             raise Exception('missing args for learning rate schedule %s',lrs_name)
       elif hasattr(tfa.optimizers,lrs_name):
-         logger.info('using learning rate schedule %s', lrs_name)
+         logger.info('using tfa.optimizers learning rate schedule %s', lrs_name)
+         lr_schedule = getattr(tfa.optimizers, lrs_name)
+         if lrs_args:
+            lr_schedule = lr_schedule(**lrs_args)
+         else:
+            raise Exception('missing args for learning rate schedule %s',lrs_name)
+      elif hasattr(tf.keras.experimental,lrs_name):
+         logger.info('using tf.keras.experimental learning rate schedule %s', lrs_name)
          lr_schedule = getattr(tfa.optimizers, lrs_name)
          if lrs_args:
             lr_schedule = lr_schedule(**lrs_args)
