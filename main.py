@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-import argparse,logging,json,time,os,sys
+import argparse,logging,json,time,os,sys,socket
 os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '4'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '4'
 import numpy as np
@@ -82,8 +82,8 @@ def main():
                        filename=args.logfilename)
    
    if hvd:
-      logging.warning('rank: %5d   size: %5d  local rank: %5d  local size: %5d',
-                      hvd.rank(), hvd.size(),
+      logging.warning('host: %s rank: %5d   size: %5d  local rank: %5d  local size: %5d',
+                      socket.gethostname(),hvd.rank(), hvd.size(),
                       hvd.local_rank(), hvd.local_size())
    
    tf.config.threading.set_inter_op_parallelism_threads(args.interop)
@@ -165,6 +165,7 @@ def main():
    test_jet_writer = None
    test_ele_writer = None
    test_bkg_writer = None
+   test_mean_writer = None
    if rank == 0:
       train_summary_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'train')
       test_summary_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'test')
@@ -172,6 +173,7 @@ def main():
       test_jet_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'jet_iou')
       test_ele_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'ele_iou')
       test_bkg_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'bkg_iou')
+      test_mean_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'mean_iou')
 
       #tf.keras.utils.plot_model(net, "network_model.png", show_shapes=True)
       
@@ -179,25 +181,36 @@ def main():
         #tf.summary.graph(train_step.get_concrete_function().graph)
 
    batches_per_epoch = 0
+   train_mIoU_sum = 0.
+   test_mIoU_sum = 0.
    for epoch_num in range(config['training']['epochs']):
       
       logger.info('begin epoch %s',epoch_num)
 
-      loss = 0.
-      acc = 0.
-      confusion_matrix = None
-      batch_num = 0.
       if not config['evaluate']:
-         loss,acc,confusion_matrix,batch_num,batches_per_epoch = \
-               epoch_loop.one_train_epoch(config,trainds,net,
-                                 loss_func,opt,epoch_num,train_summary_writer,
-                                 batches_per_epoch)
+         train_output = epoch_loop.one_train_epoch(config,trainds,net,
+                                                   loss_func,opt,epoch_num,
+                                                   train_summary_writer,
+                                                   batches_per_epoch)
+         batches_per_epoch = train_output['batches_per_epoch']
+         train_mIoU_sum += train_output['mIoU']
+         logger.info('train mIoU sum: %10.4f',train_mIoU_sum / (epoch_num + 1))
 
-      loss,acc,confusion_matrix,batch_num,batches_per_epoch = \
-            epoch_loop.one_eval_epoch(config,testds,net,
-                                 loss_func,opt,epoch_num,test_summary_writer,
-                                 batches_per_epoch,test_jet_writer,
-                                 test_ele_writer,test_bkg_writer)
+      test_output = epoch_loop.one_eval_epoch(config,testds,net,
+                                              loss_func,opt,epoch_num,
+                                              test_summary_writer,
+                                              batches_per_epoch,
+                                              test_jet_writer,
+                                              test_ele_writer,
+                                              test_bkg_writer,
+                                              test_mean_writer)
+      test_mIoU_sum += test_output['mIoU']
+      logger.info('test mIoU sum: %10.4f',test_mIoU_sum / (epoch_num + 1))
+
+      if rank == 0:
+         with test_summary_writer.as_default():
+            step = (epoch_num + 1) * batches_per_epoch
+            tf.summary.scalar('metrics/mIoU_AOC', test_mIoU_sum / (epoch_num + 1),step=step)
 
 
 def get_optimizer(config):
