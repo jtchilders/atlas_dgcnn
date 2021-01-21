@@ -9,12 +9,13 @@ def one_train_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,batches_
    return one_epoch(config,dataset,net,train_step,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,True)
 
 
-def one_eval_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,jet_writer,ele_writer,bkg_writer):
-   return one_epoch(config,dataset,net,test_step,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,False,jet_writer,ele_writer,bkg_writer)
+def one_eval_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,jet_writer,ele_writer,bkg_writer,mean_writer):
+   return one_epoch(config,dataset,net,test_step,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,False,jet_writer,ele_writer,bkg_writer,mean_writer)
 
 
 def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
-              batches_per_epoch,training,jet_writer=None,ele_writer=None,bkg_writer=None):
+              batches_per_epoch,training,jet_writer=None,ele_writer=None,
+              bkg_writer=None,mean_writer=None):
    
    # get configuration information
    first_batch    = (epoch_num == 0)
@@ -192,10 +193,10 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
       for row in range(total_confusion_matrix.shape[0]):
          total_confusion_matrix[row,:] = total_confusion_matrix[row,:] / np.sum(total_confusion_matrix[row,:])
 
-      logger.info('confusion_matrix = \n %s',total_confusion_matrix)
+      logger.info('%s confusion_matrix = \n %s',training_str,total_confusion_matrix)
 
       total_iou = total_iou / batch_num / nranks
-      logger.info('iou = %s',total_iou)
+      logger.info('%s iou = %s',training_str,total_iou)
       if not training:
          step = (epoch_num + 1) * batches_per_epoch
          with tbwriter.as_default():
@@ -208,6 +209,8 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
             tf.summary.scalar('metrics/iou',total_iou[1],step=step)
          with bkg_writer.as_default():
             tf.summary.scalar('metrics/iou',total_iou[2],step=step)
+         with mean_writer.as_default():
+            tf.summary.scalar('metrics/iou',np.mean(total_iou),step=step)
 
          json.dump(confusion_matrix.tolist(),open(os.path.join(logdir,f'epoch{epoch_num+1:03d}_confustion_matrix_{training_str}.json'),'w'))
       else:
@@ -217,7 +220,19 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
 
          json.dump(confusion_matrix.tolist(),open(os.path.join(logdir,f'epoch{epoch_num+1:03d}_confustion_matrix_{training_str}.json'),'w'))
    
-   return loss_value.numpy(),acc,total_confusion_matrix,batch_num,batches_per_epoch
+   output = {
+      "loss":  total_loss.mean(),
+      "acc":   acc,
+      "mIoU":  np.mean(total_iou),
+      "jIoU":  total_iou[0],
+      "eIoU":  total_iou[1],
+      "bIoU":  total_iou[2],
+      "confmat": confusion_matrix,
+      "batch_num": batch_num,
+      "batches_per_epoch": batches_per_epoch,
+   }
+
+   return output
 
 
 @tf.function
@@ -227,13 +242,15 @@ def train_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hv
       logits = net(inputs, training=True)
       # pred shape: [batches,points,classes]
       # labels shape: [batches,points]
-      loss_value = loss_func(labels, logits,sample_weight=weights)
+      loss_value = loss_func(labels, logits)
       # tf.print(loss_value.shape)
       # loss_value shape: [batches,points]
+      # cast to float for calculations
+      weights = tf.cast(weights,tf.float32)
       # zero out non useful points
-      # loss_value *= weights
+      loss_value *= weights
       # loss_value shape: [batches,points]
-      loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(weights,out_type=tf.float32) / tf.math.reduce_sum(weights))
+      loss_value = tf.math.reduce_mean(loss_value)
       # loss_value shape: [1]
 
       # include regularization losses
@@ -266,13 +283,13 @@ def test_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd
    # behavior during training versus inference (e.g. Dropout).
    logits = net(inputs, training=False)
    # run loss function
-   loss_value = loss_func(labels, logits,sample_weight=weights)
+   loss_value = loss_func(labels, logits)
    # cast to float for calculations
-   # weights = tf.cast(weights,tf.float32)
+   weights = tf.cast(weights,tf.float32)
    # zero out non useful points
-   # loss_value *= weights
+   loss_value *= weights
    # reduce by mean and scale by the number of non-zero points
-   loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(weights,out_type=tf.float32) / tf.math.reduce_sum(weights))
+   loss_value = tf.math.reduce_mean(loss_value)
    
    # include regularization losses
    loss_value += tf.reduce_sum(net.losses)
