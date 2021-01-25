@@ -28,6 +28,7 @@ class ConvBnLayer(tf.keras.layers.Layer):
    def call(self,inputs,training=False):
       conv = self.conv(inputs)
       bn = self.bn(conv,training=training)
+
       if self.activ:
          return self.activ(bn)
       else:
@@ -259,6 +260,8 @@ class DGCNN(tf.keras.Model):
                                              padding='valid',strides=[1,1],
                                              kernel_initializer='GlorotNormal',
                                              kernel_regularizer=kernel_regularizer)
+
+      self.linear = tf.keras.layers.Activation('linear',dtype='float32')
    
    def build(self,input_shape):
       batch_size,num_points,nfeatures = input_shape
@@ -309,6 +312,8 @@ class DGCNN(tf.keras.Model):
       logits = self.conv2d_J(net)
       # go from [batch,points,1,classes] to [batch,points,classes]
       logits = tf.squeeze(logits)
+
+      logits = self.linear(logits)
       
       return logits
 
