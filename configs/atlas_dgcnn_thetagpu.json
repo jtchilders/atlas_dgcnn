@@ -85,8 +85,5 @@
    "training": {
       "epochs":                        200,
       "status":                        10
-   },
-   "validation": {
-      "batches":                       16
    }
 }
