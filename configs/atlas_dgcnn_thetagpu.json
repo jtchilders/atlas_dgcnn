@@ -5,7 +5,9 @@
       "conv2d_size":                   128,
       "dropout":                       0.4,
       "use_kernel_reg":                false,
-      "kernel_reg":                    1e-3
+      "kernel_reg":                    1e-3,
+      "mixed_precisionBF":             "mixed_bfloat16",
+      "mixed_precision":               false
    },
    "optimizer": {
       "name":                          "Adam",
@@ -66,7 +68,7 @@
       "handler":                       "atlas_pointcloud_csv",
       "train_filelist":                "/lus/theta-fs0/projects/atlasMLbjets/parton/csv_data/zej_train.txt",
       "test_filelist":                 "/lus/theta-fs0/projects/atlasMLbjets/parton/csv_data/zej_test.txt",
-      "batch_size":                    4,
+      "batch_size":                    6,
       "shuffle_buffer":                30000,
       "reshuffle_each_iteration":      true,
       "num_parallel_readers":          8,
@@ -75,7 +77,10 @@
       "num_classes":                   3,
       "num_channels":                  3,
       "num_points":                    15000,
-      "augment":                       true
+      "rotation":                      true,
+      "smear":                         false,
+      "smear_mean":                    1.0,
+      "smear_sigma":                   0.03
    },
    "training": {
       "epochs":                        200,
