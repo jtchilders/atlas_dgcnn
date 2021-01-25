@@ -10,7 +10,7 @@ The input data can be provided as a tarball upon request. Then the test dataset 
 ```bash
 python tools/build_dataset.py -i /path/to/tarball.tgz -o /destination/path/for/dataset
 ```
-This unpacks the data into the destination path and writes two files `zej_train.txt` and `zej_test.txt` which contain a list of filenames for training and testing with roughly 20% for testing and 80% for training.
+This unpacks the data into the destination path and writes two files `zej_train.txt` and `zej_test.txt` which contain a list of filenames for training and testing with roughly 20% for testing and 80% for training. The tarball is 9GB in size, and expands to 57GB.
 
 The base configuration file `configs/atlas_dgcnn.json` should be edited so that under the `data` section these parameters point to the created file lists:
 ```json
@@ -32,5 +32,10 @@ The application can be configured via the json formatted config file. There you 
 * how often to print the status message `config['training']['status']`
 * set the batch size `config['data']['batch_size']`
 * control the optimizer and loss and learning rate schedule: `config['optimizer']` `config['loss']` `config['lr_schedule']`
+
+Examples of how run on ThetaGPU with `submit_scripts/thetagpu_dgcnn.sh` 
+
+The model is defined in `model/dgcnn.py` using the `tf.keras` interfaces.
+The dataset is loaded via the `tf.dataset` interface here `data_handler/atlas_pointcloud_csv.py`
 
 
