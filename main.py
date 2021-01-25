@@ -7,8 +7,6 @@ import tensorflow as tf
 import warnings
 warnings.filterwarnings("ignore",category=UserWarning)
 import tensorflow_addons as tfa
-#from tensorflow.python.client import device_lib
-from tensorflow.keras.mixed_precision import experimental as mixed_precision
 import data_handler
 import model,lr_func,losses,accuracies
 import sklearn.metrics
@@ -31,8 +29,6 @@ def main():
    parser.add_argument('--horovod', default=False, action='store_true', help="Use MPI with horovod")
    parser.add_argument('--profiler',default=False, action='store_true', help='Use TF profiler, needs CUPTI in LD_LIBRARY_PATH for Cuda')
    parser.add_argument('--profrank',default=0,type=int,help='set which rank to profile')
-
-   parser.add_argument('--precision',default='float32',help='set which precision to use; options include: "float32","mixed_float16","mixed_bfloat16"')
 
    parser.add_argument('--batch-term',dest='batch_term',type=int,help='if set, terminates training after the specified number of batches',default=0)
 
@@ -96,7 +92,7 @@ def main():
       tf.config.experimental.set_memory_growth(gpu, True)
    if hvd and len(gpus) > 0:
       tf.config.set_visible_devices(gpus[hvd.local_rank() % len(gpus)],'GPU')
-   
+
    logging.info(   'using tensorflow version:   %s (%s)',tf.__version__,tf.__git_version__)
    logging.info(   'using tensorflow from:      %s',tf.__file__)
    if hvd:
@@ -130,6 +126,12 @@ def main():
       config['model_file'] = args.train_more
       logger.info('continuing model file:      %s',args.train_more)
 
+
+   # using mixed precision?
+   if isinstance(config['model']['mixed_precision'],str):
+      logger.info('using mixed precsion:       %s',config['model']['mixed_precision'])
+      tf.keras.mixed_precision.set_global_policy(config['model']['mixed_precision'])
+
    logger.info('-=-=-=-=-=-=-=-=-  CONFIG FILE -=-=-=-=-=-=-=-=-')
    logger.info('%s = \n %s',args.config_filename,json.dumps(config,indent=4,sort_keys=True))
    logger.info('-=-=-=-=-=-=-=-=-  CONFIG FILE -=-=-=-=-=-=-=-=-')
@@ -137,6 +139,8 @@ def main():
 
    sys.stdout.flush()
    sys.stderr.flush()
+
+
 
    trainds,testds = data_handler.get_datasets(config)
    
