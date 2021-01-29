@@ -19,9 +19,16 @@
    },
    "lr_schedule": {
       "args": {
+         "boundaries":                 [10e3,15e3],
+         "values":                     [6e-3,1e-3,3e-4]
+      },
+      "name": "PiecewiseConstantDecay"
+   },
+   "lr_scheduleED": {
+      "args": {
          "decay_rate":                 0.75,
-         "decay_steps":                5e3,
-         "initial_learning_rate":      1e-3,
+         "decay_steps":                100e3,
+         "initial_learning_rate":      3e-3,
          "staircase":                  true
       },
       "name": "ExponentialDecay"
