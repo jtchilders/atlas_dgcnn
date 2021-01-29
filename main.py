@@ -47,6 +47,7 @@ def main():
    logging_format = '%(asctime)s %(levelname)s:%(process)s:%(thread)s:%(name)s:%(message)s'
    logging_datefmt = '%Y-%m-%d %H:%M:%S'
    logging_level = logging.INFO
+   gtape = tf.GradientTape()
    if args.horovod:
       print('importing horovod')
       sys.stdout.flush()
@@ -61,6 +62,8 @@ def main():
       nranks = hvd.size()
       if rank > 0:
          logging_level = logging.WARNING
+
+      gtape = hvd.DistributedGradientTape(gtape)
    
    # Setup Logging
    if args.debug and not args.error and not args.warning:
@@ -140,14 +143,14 @@ def main():
    sys.stdout.flush()
    sys.stderr.flush()
 
-
-
    trainds,testds = data_handler.get_datasets(config)
    
    logger.info('get model')
    net = model.get_model(config)
    loss_func = losses.get_loss(config)
    opt = get_optimizer(config)
+   if isinstance(config['model']['mixed_precision'],str):
+      opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
 
    # initialize and create the model
    # input_shape = [config['data']['batch_size'],config['data']['num_points'],config['data']['num_features']]
@@ -195,7 +198,8 @@ def main():
          train_output = epoch_loop.one_train_epoch(config,trainds,net,
                                                    loss_func,opt,epoch_num,
                                                    train_summary_writer,
-                                                   batches_per_epoch)
+                                                   batches_per_epoch,
+                                                   gtape)
          batches_per_epoch = train_output['batches_per_epoch']
          train_mIoU_sum += train_output['mIoU']
          logger.info('train mIoU sum: %10.4f',train_mIoU_sum / (epoch_num + 1))
