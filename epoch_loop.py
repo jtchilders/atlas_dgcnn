@@ -5,8 +5,8 @@ import time,logging,sklearn,json,os
 logger = logging.getLogger(__name__)
 
 
-def one_train_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,batches_per_epoch):
-   return one_epoch(config,dataset,net,train_step,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,True)
+def one_train_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,gtape):
+   return one_epoch(config,dataset,net,train_step,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,True,gtape=gtape)
 
 
 def one_eval_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,jet_writer,ele_writer,bkg_writer,mean_writer):
@@ -15,7 +15,7 @@ def one_eval_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,batches_p
 
 def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
               batches_per_epoch,training,jet_writer=None,ele_writer=None,
-              bkg_writer=None,mean_writer=None):
+              bkg_writer=None,mean_writer=None,gtape=None):
    
    # get configuration information
    first_batch    = (epoch_num == 0)
@@ -31,6 +31,7 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
    hvd            = config.get('hvd',None)
    balanced       = config['loss']['balanced']
    training_str   = 'training' if training else 'testing'
+
    
    # used for accuracy check
    softmax        = tf.keras.layers.Softmax()
@@ -77,7 +78,19 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
          nonzero_to_class_scaler = 1.
       
       # run forward/backward pass
-      loss_value,logits = step_func(net,loss_func,inputs,labels,weights,opt,first_batch,hvd,nonzero_to_class_scaler)
+      loss_value,logits = step_func(net,loss_func,inputs,labels,weights,opt,nonzero_to_class_scaler,gtape=gtape)
+
+      # Horovod: broadcast initial variable states from rank 0 to all other processes.
+      # This is necessary to ensure consistent initialization of all workers when
+      # training is started with random weights or restored from a checkpoint.
+      #
+      # Note: broadcast should be done after the first gradient step to ensure optimizer
+      # initialization.
+      if first_batch and training and hvd:
+         hvd.broadcast_variables(net.variables, root_rank=0)
+         hvd.broadcast_variables(opt.variables(), root_rank=0)
+         first_batch = False
+   
 
       # number of non-zero points in this batch
       nonzero = tf.math.reduce_sum(weights)
@@ -105,7 +118,6 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
       status_confusion_matrix += confusion_matrix
       status_iou += iou
 
-      first_batch = False
       batch_num += 1
       
       # do monitoring periodically
@@ -236,9 +248,9 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
 
 
 @tf.function
-def train_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd=None,scaler=1.,root_rank=0):
+def train_step(net,loss_func,inputs,labels,weights,opt=None,scaler=1.,gtape=None):
    
-   with tf.GradientTape() as tape:
+   with gtape:
       logits = net(inputs, training=True)
       # pred shape: [batches,points,classes]
       # labels shape: [batches,points]
@@ -257,28 +269,18 @@ def train_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hv
       loss_value += tf.reduce_sum(net.losses)
 
       loss_value *= scaler
-
+      # loss_value = opt.get_scaled_loss(loss_value)
       # tf.print('net.losses',net.losses)
    
-   if hvd:
-      tape = hvd.DistributedGradientTape(tape)
-   grads = tape.gradient(loss_value, net.trainable_variables)
+   grads = gtape.gradient(loss_value, net.trainable_variables)
+   # grads = opt.get_unscaled_gradients(grads)
    opt.apply_gradients(zip(grads, net.trainable_variables))
-   # Horovod: broadcast initial variable states from rank 0 to all other processes.
-   # This is necessary to ensure consistent initialization of all workers when
-   # training is started with random weights or restored from a checkpoint.
-   #
-   # Note: broadcast should be done after the first gradient step to ensure optimizer
-   # initialization.
-   if hvd and first_batch:
-      hvd.broadcast_variables(net.variables, root_rank=root_rank)
-      hvd.broadcast_variables(opt.variables(), root_rank=root_rank)
    
    return loss_value,logits
 
 
 @tf.function
-def test_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd=None,scaler=1.,root_rank=0):
+def test_step(net,loss_func,inputs,labels,weights,opt=None,scaler=1.,gtape=None):
    # training=False is only needed if there are layers with different
    # behavior during training versus inference (e.g. Dropout).
    logits = net(inputs, training=False)
