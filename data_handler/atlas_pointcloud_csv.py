@@ -106,14 +106,12 @@ def load_csv_file_py(filename):
    inputs[0:df_inputs.shape[0],...] = df_inputs
 
    # build the labels
-   df_labels = df[['pid']]
+   df_labels = df.pid
    # map pid to class label
-   df_labels = df_labels.replace({'pid':labels_dict})
+   df_labels = df_labels.map(labels_dict)
 
    # convert to numpy
    df_labels = df_labels.to_numpy()
-   df_labels = np.squeeze(df_labels,-1)
-   # tf.print('df_labels: ',df_labels.shape)
 
    # count number of each class
    # use the lowest to decide weights for loss function

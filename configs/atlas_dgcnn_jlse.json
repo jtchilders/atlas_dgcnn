@@ -29,7 +29,7 @@
       "handler":                       "atlas_pointcloud_csv",
       "train_filelist":                "/gpfs/jlse-fs0/projects/datascience/parton/data/atlas/csv/zej_train.txt",
       "test_filelist":                 "/gpfs/jlse-fs0/projects/datascience/parton/data/atlas/csv/zej_val.txt",
-      "batch_size":                    6,
+      "batch_size":                    2,
       "shuffle_buffer":                10000,
       "reshuffle_each_iteration":      true,
       "num_parallel_readers":          8,
