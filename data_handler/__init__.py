@@ -1,9 +1,9 @@
 import logging
 logger = logging.getLogger('data_handler')
 
-__all__ = ['random_file_generator','h5_file_generator','csv_file_generator','mnist_dataset','ilsvrc_dataset','atlas_pointcloud_csv']
+__all__ = ['random_file_generator','h5_file_generator','csv_file_generator','atlas_pointcloud_csv']
 from . import random_file_generator,h5_file_generator,csv_file_generator
-from . import mnist_dataset,ilsvrc_dataset,atlas_pointcloud_csv
+from . import atlas_pointcloud_csv
 
 
 def get_datasets(config):

@@ -16,7 +16,7 @@ col_dtype    = {'id': np.int64, 'index': np.int32, 'x': np.float32, 'y': np.floa
                 'Et': np.float32, 'pid': np.int32, 'pn': np.int32, 'peta': np.float32,
                 'pphi': np.float32, 'ppt': np.float32,
                 'trk_good': np.float32, 'trk_id': np.float32, 'trk_pt': np.float32}
-include_cols = ['x','y','z','r','eta','phi','Et']
+include_cols = ['x','y','z','eta','phi','r','Et']
 gnum_points = None
 gnum_features = None
 
@@ -27,15 +27,14 @@ def get_datasets(config):
    gnum_points = gconfig['data']['num_points']
    gnum_features = gconfig['data']['num_features']
 
-   train = from_filelist(config['data']['train_filelist'],config)
-   valid = from_filelist(config['data']['test_filelist'],config)
+   train = from_filelist(config['data']['train_filelist'],config,True)
+   valid = from_filelist(config['data']['test_filelist'],config,False)
    
    return train,valid
 
 
-def from_filelist(filelist_filename,config):
+def from_filelist(filelist_filename,config,training=False):
    logger.debug(f'build dataset {filelist_filename}')
-
    dc = config['data']
 
    numranks = 1
@@ -49,11 +48,14 @@ def from_filelist(filelist_filename,config):
          filelist.append(line.strip())
 
    # estimate batches per MPI rank
-   batches_per_rank = int(len(filelist) / dc['batch_size'] / numranks)
+   total_batches = int(len(filelist) / dc['batch_size'])
+   batches_per_rank = int(total_batches / numranks)
+   total_even_batches = batches_per_rank * numranks
+   total_events = total_even_batches * dc['batch_size']
    logger.info(f'input filelist contains {len(filelist)} files, estimated batches per rank {batches_per_rank}')
    
    # glob for the input files
-   filelist = tf.data.Dataset.from_tensor_slices(filelist)
+   filelist = tf.data.Dataset.from_tensor_slices(filelist[0:total_events])
    
    # shard the data
    if config['hvd']:
@@ -65,45 +67,83 @@ def from_filelist(filelist_filename,config):
 
    # map to read files in parallel
    logger.debug('starting map')
-   ds = filelist.map(load_csv_file,
-                     num_parallel_calls=tf.data.experimental.AUTOTUNE)  # dc['num_parallel_readers']) #
-   # ds = tf.data.experimental.CsvDataset(filelist,
-   #                                      record_defaults=[tf.int64,tf.int32,tf.float32,tf.float32,
-   #                                                       tf.float32,tf.float32,tf.float32,tf.float32,
-   #                                                       tf.float32,tf.int32,tf.int32,tf.float32,
-   #                                                       tf.float32,tf.float32],
-   #                                      field_delim='\t',
-   #                                      select_cols=[0,2,3,4,5,6,7,8,9])
+   if training:
+      ds = filelist.map(load_csv_file_training,
+                     num_parallel_calls=tf.data.experimental.AUTOTUNE)
+   else:
+      ds = filelist.map(load_csv_file_testing,
+                     num_parallel_calls=tf.data.experimental.AUTOTUNE)
    # how many inputs to prefetch to improve pipeline performance
-   ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)  # dc['prefectch_buffer_size']) #
-
-   # ds = ds.apply(tf.data.Dataset.unbatch)
+   ds = ds.prefetch(buffer_size=tf.data.experimental.AUTOTUNE)
 
    # batch the data
-   ds = ds.batch(dc['batch_size'])
+   ds = ds.batch(dc['batch_size'],drop_remainder=True)
 
    return ds
 
 
-def load_csv_file(filename):
-   return tf.py_function(load_csv_file_py,[filename],[tf.float32,tf.int32,tf.int8])
+def load_csv_file_training(filename):
+   return tf.py_function(load_csv_file_py_training,[filename],[tf.float32,tf.int32,tf.int32,tf.int32])
 
 
-def load_csv_file_py(filename):
+def load_csv_file_testing(filename):
+   return tf.py_function(load_csv_file_py_testing,[filename],[tf.float32,tf.int32,tf.int32,tf.int32])
+
+
+def load_csv_file_py_training(filename):
+   return load_csv_file_py(filename,training=True)
+
+
+def load_csv_file_py_testing(filename):
+   return load_csv_file_py(filename,training=False)
+
+
+def load_csv_file_py(filename,training=False):
    filename = bytes.decode(filename.numpy())
 
    df = pd.read_csv(filename,header=None,names=col_names, dtype=col_dtype, sep='\t')
 
+   # clip the number of points from the input based on the config num_points
+   if len(df) > gnum_points:
+      df = df[0:gnum_points]
+
+   if gconfig['data']['rotation'] and training:
+      rotation_angle,rotation_matrix = random_rotation()
+      # logger.info('old (x,y,z) = %s  old eta,phi = %s',df[['x','y','z']].to_numpy()[0],df[['eta','phi']].to_numpy()[0])
+      df[['x','y','z']] = np.dot(df[['x','y','z']],rotation_matrix)
+      df['phi'] = df['phi'] + rotation_angle  # phi is -pi to pi, rotation angle is 0 - 2pi
+      df['phi'] = df['phi'].apply(lambda x: x if x < np.pi else x - 2 * np.pi)
+      # logger.info('new (x,y,z) = %s  new eta,phi = %s',df[['x','y','z']].to_numpy()[0],df[['eta','phi']].to_numpy()[0])
+      
+   # normalize variables
+   # if False:
+   #    # build the model inputs
+   #    df_inputs = df[include_cols].to_numpy()
+   #    scaler = MinMaxScaler()
+   #    df_inputs = scaler.fit_transform(df_inputs)
+   # else:
+   #    r_mean = df['r'].mean()
+   #    r_sigma = df['r'].std()
+   #    df['r'] -= r_mean
+   #    df['r'] /= (r_sigma + np.finfo(np.float32).eps)
+
+   #    et_mean = df['Et'].mean()
+   #    et_sigma = df['Et'].std()
+   #    df['Et'] -= et_mean
+   #    df['Et'] /= (et_sigma + np.finfo(np.float32).eps)
+
    # build the model inputs
    df_inputs = df[include_cols].to_numpy()
-   # normalize variables
-   scaler = MinMaxScaler()
-   df_inputs = scaler.fit_transform(df_inputs)
-   # tf.print('df_inputs: ',df_inputs[0:10,...])
+
+   # smear data
+   if gconfig['data']['smear'] and training:
+      smear = np.random.normal(gconfig['data']['smear_mean'],gconfig['data']['smear_sigma'], df_inputs.shape)
+      df_inputs *= smear
 
    # stuff ragged event sizes into fixed size
    inputs = np.zeros([gnum_points,gnum_features])
-   inputs[0:df_inputs.shape[0],...] = df_inputs
+   # logger.info('3 inputs: %s',inputs.shape)
+   inputs[0:df_inputs.shape[0],...] = df_inputs[0:df_inputs.shape[0],...]
 
    # build the labels
    df_labels = df.pid
@@ -117,27 +157,44 @@ def load_csv_file_py(filename):
    # use the lowest to decide weights for loss function
    # get list of unique classes and their occurance count
    unique_classes,unique_counts = np.unique(df_labels,return_counts=True)
+   # logger.info('unique_classes = %s',unique_classes)
+   # logger.info('unique_counts = %s',unique_counts)
    # get mininum class occurance count
    min_class_count = np.min(unique_counts)
-   # tf.print('min_class_count:',min_class_count,unique_classes,unique_counts)
+   # logger.info('min_class_count = %s',min_class_count)
    # create class weights to be applied to loss as mask
    # this will balance the loss function across classes
-   class_weights = np.zeros([gconfig['data']['num_points']],dtype=np.int8)
+   class_weights = np.zeros([gnum_points],dtype=np.int32)
+   # logger.info('class_weights.shape = %s',class_weights.shape)
    # set weights to one for an equal number of classes
    for class_label in unique_classes:
-      # tf.print('class_label:',class_label)
+      # logger.info('class_label = %s',class_label)
       class_indices = np.nonzero(df_labels == class_label)[0]
+      # logger.info('class_indices.shape = %s',class_indices.shape)
       class_indices = np.random.choice(class_indices,size=[min_class_count],replace=False)
+      # logger.info('class_indices.shape = %s',class_indices.shape)
       class_weights[class_indices] = 1
-      # tf.print('3: ',np.unique(class_weights,return_counts=True))
+      # logger.info('class_weights.sum = %s',class_weights.sum())
+      # logger.info('labels_weights.sum = %s',df_labels[class_indices].sum())
+   # logger.info('class_weights unique = %s',np.unique(class_weights,return_counts=True))
 
-   # unique_classes_count = np.zeros(gconfig['data']['num_classes'])
-   # for i,j in enumerate(unique_classes):
-   #    unique_classes_count[j] = counts[i]
+   nonzero_mask = np.zeros([gnum_points],dtype=np.int32)
+   nonzero_mask[0:df_labels.shape[0]] = 1
 
-   # pad with zeros
+   # pad with zeros or clip some points
    labels = np.zeros([gconfig['data']['num_points']])
-   labels[0:df_labels.shape[0]] = df_labels
+   labels[0:df_labels.shape[0]] = df_labels[0:df_labels.shape[0]]
 
    # return inputs and labels
-   return inputs,labels,class_weights
+   return inputs,labels,class_weights,nonzero_mask
+
+
+def random_rotation():
+   rotation_angle = np.random.uniform() * 2 * np.pi
+   cosval = np.cos(rotation_angle)
+   sinval = np.sin(rotation_angle)
+   rotation_matrix = np.array([[cosval, -sinval, 0],
+                              [sinval, cosval, 0],
+                              [0, 0, 1]])
+   
+   return rotation_angle,rotation_matrix

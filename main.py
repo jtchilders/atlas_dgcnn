@@ -1,14 +1,16 @@
 #!/usr/bin/env python
-import argparse,logging,json,time,os,sys
-os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '3'
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+import argparse,logging,json,time,os,sys,socket
+os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '4'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '4'
 import numpy as np
 import tensorflow as tf
-#from tensorflow.python.client import device_lib
-from tensorflow.keras.mixed_precision import experimental as mixed_precision
+import warnings
+warnings.filterwarnings("ignore",category=UserWarning)
+import tensorflow_addons as tfa
 import data_handler
 import model,lr_func,losses,accuracies
-
+import sklearn.metrics
+import epoch_loop
 logger = logging.getLogger(__name__)
 DEFAULT_CONFIG = 'config.json'
 DEFAULT_INTEROP = int(os.cpu_count() / 4)
@@ -28,9 +30,10 @@ def main():
    parser.add_argument('--profiler',default=False, action='store_true', help='Use TF profiler, needs CUPTI in LD_LIBRARY_PATH for Cuda')
    parser.add_argument('--profrank',default=0,type=int,help='set which rank to profile')
 
-   parser.add_argument('--precision',default='float32',help='set which precision to use; options include: "float32","mixed_float16","mixed_bfloat16"')
-
    parser.add_argument('--batch-term',dest='batch_term',type=int,help='if set, terminates training after the specified number of batches',default=0)
+
+   parser.add_argument('--evaluate',help='evaluate a pre-trained model file on the test data set only.')
+   parser.add_argument('--train-more',dest='train_more',help='load a pre-trained model file and continue training.')
 
    parser.add_argument('--debug', dest='debug', default=False, action='store_true', help="Set Logger to DEBUG")
    parser.add_argument('--error', dest='error', default=False, action='store_true', help="Set Logger to ERROR")
@@ -44,7 +47,12 @@ def main():
    logging_format = '%(asctime)s %(levelname)s:%(process)s:%(thread)s:%(name)s:%(message)s'
    logging_datefmt = '%Y-%m-%d %H:%M:%S'
    logging_level = logging.INFO
+   gtape = tf.GradientTape()
    if args.horovod:
+      print('importing horovod')
+      sys.stdout.flush()
+      sys.stderr.flush()
+
       import horovod
       import horovod.tensorflow as hvd
       hvd.init()
@@ -54,6 +62,8 @@ def main():
       nranks = hvd.size()
       if rank > 0:
          logging_level = logging.WARNING
+
+      gtape = hvd.DistributedGradientTape(gtape)
    
    # Setup Logging
    if args.debug and not args.error and not args.warning:
@@ -71,8 +81,8 @@ def main():
                        filename=args.logfilename)
    
    if hvd:
-      logging.warning('rank: %5d   size: %5d  local rank: %5d  local size: %5d', 
-                      hvd.rank(), hvd.size(),
+      logging.warning('host: %s rank: %5d   size: %5d  local rank: %5d  local size: %5d',
+                      socket.gethostname(),hvd.rank(), hvd.size(),
                       hvd.local_rank(), hvd.local_size())
    
    tf.config.threading.set_inter_op_parallelism_threads(args.interop)
@@ -85,9 +95,7 @@ def main():
       tf.config.experimental.set_memory_growth(gpu, True)
    if hvd and len(gpus) > 0:
       tf.config.set_visible_devices(gpus[hvd.local_rank() % len(gpus)],'GPU')
-   
 
-   
    logging.info(   'using tensorflow version:   %s (%s)',tf.__version__,tf.__git_version__)
    logging.info(   'using tensorflow from:      %s',tf.__file__)
    if hvd:
@@ -100,194 +108,117 @@ def main():
    config = json.load(open(args.config_filename))
    # config['device'] = device_str
    
+   config['profrank'] = args.profrank
+   config['profiler'] = args.profiler
+   config['logdir'] = args.logdir
+   config['rank'] = rank
+   config['nranks'] = nranks
+   config['evaluate'] = False
+   config['batch_term'] = args.batch_term
+   if args.batch_term > 0:
+      config['training']['epochs'] = 1
+      config['training']['status'] = 1 if args.batch_term < config['training']['status'] else config['training']['status']
+
+   if args.evaluate is not None:
+      config['evaluate'] = True
+      config['model_file'] = args.evaluate
+      config['training']['epochs'] = 1
+      logger.info('evaluating model file:      %s',args.evaluate)
+   elif args.train_more is not None:
+      config['train_more'] = True
+      config['model_file'] = args.train_more
+      logger.info('continuing model file:      %s',args.train_more)
+
+
+   # using mixed precision?
+   if isinstance(config['model']['mixed_precision'],str):
+      logger.info('using mixed precsion:       %s',config['model']['mixed_precision'])
+      tf.keras.mixed_precision.set_global_policy(config['model']['mixed_precision'])
+
    logger.info('-=-=-=-=-=-=-=-=-  CONFIG FILE -=-=-=-=-=-=-=-=-')
    logger.info('%s = \n %s',args.config_filename,json.dumps(config,indent=4,sort_keys=True))
    logger.info('-=-=-=-=-=-=-=-=-  CONFIG FILE -=-=-=-=-=-=-=-=-')
    config['hvd'] = hvd
 
+   sys.stdout.flush()
+   sys.stderr.flush()
+
    trainds,testds = data_handler.get_datasets(config)
    
    logger.info('get model')
    net = model.get_model(config)
-
    loss_func = losses.get_loss(config)
-
    opt = get_optimizer(config)
+   if isinstance(config['model']['mixed_precision'],str):
+      opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
 
+   # initialize and create the model
+   # input_shape = [config['data']['batch_size'],config['data']['num_points'],config['data']['num_features']]
+   # output = net(tf.random.uniform(input_shape))
+
+   # load previous model weights
+   if args.evaluate:
+      net.load_weights(args.evaluate)
+   elif args.train_more:
+      net.load_weights(args.train_more)
+
+   # # synchronize models across ranks
+   # if hvd:
+   #    hvd.broadcast_variables(net.variables, root_rank=0)
+   #    hvd.broadcast_variables(opt.variables(), root_rank=0)
+
+   train_summary_writer = None
+   test_summary_writer = None
+   test_jet_writer = None
+   test_ele_writer = None
+   test_bkg_writer = None
+   test_mean_writer = None
    if rank == 0:
       train_summary_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'train')
       test_summary_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'test')
+      
+      test_jet_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'jet_iou')
+      test_ele_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'ele_iou')
+      test_bkg_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'bkg_iou')
+      test_mean_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'mean_iou')
 
-   first_batch = True
+      #tf.keras.utils.plot_model(net, "network_model.png", show_shapes=True)
+      
+      #with train_summary_writer.as_default():
+        #tf.summary.graph(train_step.get_concrete_function().graph)
+
    batches_per_epoch = 0
-   exit = False
-   status_count = config['training']['status']
-   batch_size = config['data']['batch_size']
+   train_mIoU_sum = 0.
+   test_mIoU_sum = 0.
    for epoch_num in range(config['training']['epochs']):
       
-      train_loss_metric = 0
-      train_accuracy_metric = 0
-
       logger.info('begin epoch %s',epoch_num)
 
-      batch_num = 0
-      start = time.time()
-      image_rate_sum = 0.
-      image_rate_sum2 = 0.
-      image_rate_n = 0.
-      partial_img_rate = np.zeros(10)
-      partial_img_rate_counter = 0
-      if rank == args.profrank and args.profiler:
-          logger.info('profiling')
-          tf.profiler.experimental.start(args.logdir)
-      for trainds_entry in trainds:
-         if config['data']['handler'] == 'atlas_pointcloud_csv':
-            inputs, labels, class_weights = trainds_entry
-            #logger.info('inputs: %s labels = %s class_weights = %s',inputs.shape,labels.shape,class_weights.shape)
-         else:
-            inputs,labels = trainds_entry
-            class_weights = None
-         
-         loss_value,pred = train_step(net,loss_func,opt,inputs,labels,first_batch,hvd,config['model']['name'],class_weights)
-         #logger.info('loss = %s',loss_value)
-         tf.summary.experimental.set_step(batch_num + batches_per_epoch * epoch_num)
+      if not config['evaluate']:
+         train_output = epoch_loop.one_train_epoch(config,trainds,net,
+                                                   loss_func,opt,epoch_num,
+                                                   train_summary_writer,
+                                                   batches_per_epoch,
+                                                   gtape)
+         batches_per_epoch = train_output['batches_per_epoch']
+         train_mIoU_sum += train_output['mIoU']
+         logger.info('train mIoU sum: %10.4f',train_mIoU_sum / (epoch_num + 1))
 
-         first_batch = False
-         batch_num += 1
-
-         train_loss_metric += tf.reduce_mean(loss_value)
-         train_accuracy_metric += tf.divide(tf.reduce_sum(tf.cast(tf.equal(tf.argmax(pred,-1,tf.int32),tf.cast(labels,tf.int32)),tf.int32)),tf.shape(labels,tf.int32))
-
-         if batch_num % status_count == 0:
-            img_per_sec = status_count * batch_size * nranks / (time.time() - start)
-            img_per_sec_std = 0
-            if batch_num > 10:
-               image_rate_n += 1
-               image_rate_sum += img_per_sec
-               image_rate_sum2 += img_per_sec * img_per_sec
-               partial_img_rate[partial_img_rate_counter % 10] = img_per_sec
-               partial_img_rate_counter += 1
-               img_per_sec = np.mean(partial_img_rate[partial_img_rate>0])
-               img_per_sec_std = np.std(partial_img_rate[partial_img_rate>0])
-            loss = train_loss_metric / status_count
-            acc = (train_accuracy_metric / status_count)[0]
-            logger.info(" [%5d:%5d]: loss = %10.5f acc = %10.5f  imgs/sec = %7.1f +/- %7.1f",
-                           epoch_num,batch_num,loss.numpy(),acc.numpy(),img_per_sec,img_per_sec_std)
-            if rank == 0:
-               with train_summary_writer.as_default():
-                  step = epoch_num * batches_per_epoch + batch_num
-                  tf.summary.experimental.set_step(step)
-                  tf.summary.scalar('loss', loss, step=step)
-                  tf.summary.scalar('accuracy', acc, step=step)
-                  tf.summary.scalar('img_per_sec',img_per_sec,step=step)
-                  tf.summary.scalar('learning_rate',opt._decayed_lr(tf.float32))
-            start = time.time()
-            train_loss_metric = 0
-            train_accuracy_metric = 0
-            
-                
-         if args.batch_term == batch_num:
-            logger.info('terminating batch training after %s batches',batch_num)
-            if rank == args.profrank and args.profiler:
-               logger.info('stop profiling')
-               tf.profiler.experimental.stop()
-            exit = True
-            break
-         # for testing
-         # if batch_num == 20: break
-      if exit:
-         break
-      if rank == 0:
-         batches_per_epoch = batch_num
-         ave_img_rate = image_rate_sum / image_rate_n
-         std_img_rate = np.sqrt((1/image_rate_n) * image_rate_sum2 - ave_img_rate*ave_img_rate)
-         logger.info('batches_per_epoch = %s  Ave Img Rate: %10.5f +/- %10.5f',batches_per_epoch,ave_img_rate,std_img_rate)
-      
-      test_loss_metric = 0.
-      test_accuracy_metric = 0.
-      for test_num,(test_inputs, test_labels) in enumerate(testds):
-         #logger.info("test_inputs shape: %s test_labels shape: %s",test_inputs.shape,test_labels.shape)
-         loss_value,pred = test_step(net,loss_func,test_inputs, test_labels, config['model']['name'])
-         #logger.info("loss_value shape: %s pred shape: %s",loss_value.shape,pred.shape)
-         #logger.info("loss_value: %s  pred: %s pred_label: %s",loss_value,tf.argmax(tf.nn.softmax(pred,-1),-1)[0:10],test_labels[0:10])
-
-         test_loss_metric += tf.reduce_mean(loss_value)
-         test_accuracy_metric += tf.divide(tf.reduce_sum(tf.cast(tf.equal(tf.argmax(pred,-1,tf.int32),tf.cast(test_labels,tf.int32)),tf.int32)),tf.shape(test_labels,tf.int32))
-
-         test_loss = test_loss_metric / test_num
-         test_accuracy = test_accuracy_metric / test_num
-
-         if (test_num + 1) % status_count == 0:
-            logger.info(' [%5d:%5d]: test loss = %10.5f  test acc = %10.5f',
-                         epoch_num,test_num,test_loss,test_accuracy)
-
-      # test_loss = tf.constant(test_loss_metric.result())
-      # test_acc = tf.constant(test_accuracy_metric.result())
-      # mean_test_loss = hvd.allreduce(test_loss)
-      # mean_test_acc = hvd.allreduce(test_acc)
+      test_output = epoch_loop.one_eval_epoch(config,testds,net,
+                                              loss_func,opt,epoch_num,
+                                              test_summary_writer,
+                                              batches_per_epoch,
+                                              test_jet_writer,
+                                              test_ele_writer,
+                                              test_bkg_writer,
+                                              test_mean_writer)
+      test_mIoU_sum += test_output['mIoU']
+      logger.info('test mIoU sum: %10.4f',test_mIoU_sum / (epoch_num + 1))
 
       if rank == 0:
          with test_summary_writer.as_default():
-            tf.summary.scalar('loss', test_loss, step=epoch_num * batches_per_epoch + batch_num)
-            tf.summary.scalar('accuracy', test_accuracy[0], step=epoch_num * batches_per_epoch + batch_num)
-         ave_img_rate = image_rate_sum / image_rate_n
-         std_img_rate = np.sqrt((1/image_rate_n) * image_rate_sum2 - ave_img_rate*ave_img_rate)
-         template = 'Epoch {:10.5f}, Loss: {:10.5f}, Accuracy: {:10.5f}, Test Loss: {:10.5f}, Test Accuracy: {:10.5f} Average Image Rate: {:10.5f} +/- {:10.5f}'
-         logger.info(template.format(epoch_num + 1,
-                               loss,
-                               acc * 100,
-                               test_loss,
-                               test_accuracy[0] * 100,
-                               ave_img_rate,
-                               std_img_rate))
-
-
-@tf.function
-def train_step(net,loss_func,opt,inputs,labels,first_batch=False,hvd=None,model_name='',class_weights=None,root_rank=0):
-
-   if model_name == 'dgcnn':
-      with tf.GradientTape() as tape:
-         pred = net(inputs, training=True)
-         loss_value = loss_func(labels, tf.cast(pred,tf.float32),sample_weight=class_weights)
-   else:
-      with tf.GradientTape() as tape:
-         pred = net(inputs, training=True)
-         loss_value = loss_func(labels, tf.cast(pred,tf.float32))
-   if hvd:
-      tape = hvd.DistributedGradientTape(tape)
-   grads = tape.gradient(loss_value, net.trainable_variables)
-   opt.apply_gradients(zip(grads, net.trainable_variables))
-   # Horovod: broadcast initial variable states from rank 0 to all other processes.
-   # This is necessary to ensure consistent initialization of all workers when
-   # training is started with random weights or restored from a checkpoint.
-   #
-   # Note: broadcast should be done after the first gradient step to ensure optimizer
-   # initialization.
-   if hvd and first_batch:
-      hvd.broadcast_variables(net.variables, root_rank=root_rank)
-      hvd.broadcast_variables(opt.variables(), root_rank=root_rank)
-      
-
-   # tf.print(tf.argmax(tf.nn.softmax(pred,-1),-1),labels)
-
-   return loss_value,pred
-
-
-@tf.function
-def test_step(net,loss_func,inputs,labels,model_name=''):
-   # training=False is only needed if there are layers with different
-   # behavior during training versus inference (e.g. Dropout).
-   end_points = None
-   if model_name == 'dgcnn':
-      pred,end_points = net(inputs, training=False)
-   else:
-      pred = net(inputs, training=False)
-   #tf.print(pred)
-   loss_value = loss_func(labels, tf.cast(pred,tf.float32))
-   # tf.print(tf.math.reduce_sum(inputs),tf.argmax(tf.nn.softmax(predictions,-1),-1),labels,loss_value)
-
-   return loss_value,pred,end_points
-
+            step = (epoch_num + 1) * batches_per_epoch
+            tf.summary.scalar('metrics/mIoU_AOC', test_mIoU_sum / (epoch_num + 1),step=step)
 
 
 def get_optimizer(config):
@@ -298,23 +229,50 @@ def get_optimizer(config):
       lrs_name = config['lr_schedule']['name']
       lrs_args = config['lr_schedule'].get('args',None)
       if hasattr(tf.keras.optimizers.schedules, lrs_name):
-         logger.info('using learning rate schedule %s', lrs_name)
+         logger.info('using tf.keras.optimizers.schedules learning rate schedule %s', lrs_name)
          lr_schedule = getattr(tf.keras.optimizers.schedules, lrs_name)
          if lrs_args:
             lr_schedule = lr_schedule(**lrs_args)
          else:
             raise Exception('missing args for learning rate schedule %s',lrs_name)
+      elif lrs_name in globals():
+         logger.info('using global learning rate schedule %s', lrs_name)
+         lr_schedule = globals()[lrs_name]
+         if lrs_args:
+            lr_schedule = lr_schedule(**lrs_args)
+         else:
+            raise Exception('missing args for learning rate schedule %s',lrs_name)
+      elif hasattr(tfa.optimizers,lrs_name):
+         logger.info('using tfa.optimizers learning rate schedule %s', lrs_name)
+         lr_schedule = getattr(tfa.optimizers, lrs_name)
+         if lrs_args:
+            lr_schedule = lr_schedule(**lrs_args)
+         else:
+            raise Exception('missing args for learning rate schedule %s',lrs_name)
+      elif hasattr(tf.keras.experimental,lrs_name):
+         logger.info('using tf.keras.experimental learning rate schedule %s', lrs_name)
+         lr_schedule = getattr(tfa.optimizers, lrs_name)
+         if lrs_args:
+            lr_schedule = lr_schedule(**lrs_args)
+         else:
+            raise Exception('missing args for learning rate schedule %s',lrs_name)
+      else:
+         raise Exception('failed to find lr_schedule: %s' % lrs_name)
 
    opt_name = config['optimizer']['name']
-   opt_args = config['optimizer'].get('args',None)
+   opt_args = config['optimizer'].get('args',{})
    if hasattr(tf.keras.optimizers, opt_name):
+      logger.info('using optimizer: %s',opt_name)
       if opt_args:
          if lr_schedule:
             opt_args['learning_rate'] = lr_schedule
          logger.info('passing args to optimizer: %s', opt_args)
          return getattr(tf.keras.optimizers, opt_name)(**opt_args)
       else:
-         return getattr(tf.keras.optimizers, opt_name)()
+         if lr_schedule:
+            opt_args['learning_rate'] = lr_schedule
+         logger.info('passing args to optimizer: %s', opt_args)
+         return getattr(tf.keras.optimizers, opt_name)(**opt_args)
    else:
       raise Exception('could not locate optimizer %s',opt_name)
 

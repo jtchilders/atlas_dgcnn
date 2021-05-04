@@ -2,16 +2,22 @@ import tensorflow as tf
 import logging
 logger = logging.getLogger('loss')
 
-__all__ = ['focal_loss_softmax']
+__all__ = ['focal_loss_softmax','SparseCategoricalFocalLoss']
 from . import focal_loss_softmax
+from focal_loss import SparseCategoricalFocalLoss
 
 
 def get_loss(config):
    loss_name = config['loss']['name']
    if loss_name in globals():
       logger.info('using loss name %s',loss_name)
-      return globals()[loss_name]
+      if 'args' in config['loss']:
+         logging.info('passing args to loss function: %s',config['loss']['args'])
+         return globals()[loss_name](**config['loss']['args'])
+      else:
+         return globals()[loss_name]()
    elif hasattr(tf.keras.losses,loss_name):
+      logger.info('using loss name %s',loss_name)
       if 'args' in config['loss']:
          logging.info('passing args to loss function: %s',config['loss']['args'])
          return getattr(tf.keras.losses, loss_name)(**config['loss']['args'])
