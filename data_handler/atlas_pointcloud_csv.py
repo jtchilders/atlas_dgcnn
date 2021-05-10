@@ -107,33 +107,38 @@ def load_csv_file_py(filename,training=False):
    if len(df) > gnum_points:
       df = df[0:gnum_points]
 
-   if gconfig['data']['augment'] and training:
+   if gconfig['data']['rotation'] and training:
       rotation_angle,rotation_matrix = random_rotation()
-      # logger.info('old (x,y,z) = %s  old eta,phi = %s',df[['x','y','z'][0]],df[['eta','phi']])
+      # logger.info('old (x,y,z) = %s  old eta,phi = %s',df[['x','y','z']].to_numpy()[0],df[['eta','phi']].to_numpy()[0])
       df[['x','y','z']] = np.dot(df[['x','y','z']],rotation_matrix)
-      df['phi'] = df['phi'] + (rotation_angle - np.pi)
-      df['phi'] = df['phi'].apply(lambda x: x if x < np.pi else x - np.pi)
-      # logger.info('new (x,y,z) = %s  new eta,phi = %s',df[['x','y','z'][0]],df[['eta','phi']])
+      df['phi'] = df['phi'] + rotation_angle  # phi is -pi to pi, rotation angle is 0 - 2pi
+      df['phi'] = df['phi'].apply(lambda x: x if x < np.pi else x - 2 * np.pi)
+      # logger.info('new (x,y,z) = %s  new eta,phi = %s',df[['x','y','z']].to_numpy()[0],df[['eta','phi']].to_numpy()[0])
       
    # normalize variables
-   if False:
-      # build the model inputs
-      df_inputs = df[include_cols].to_numpy()
-      scaler = MinMaxScaler()
-      df_inputs = scaler.fit_transform(df_inputs)
-   else:
-      r_mean = df['r'].mean()
-      r_sigma = df['r'].std()
-      df['r'] -= r_mean
-      df['r'] /= (r_sigma + np.finfo(np.float32).eps)
+   # if False:
+   #    # build the model inputs
+   #    df_inputs = df[include_cols].to_numpy()
+   #    scaler = MinMaxScaler()
+   #    df_inputs = scaler.fit_transform(df_inputs)
+   # else:
+   #    r_mean = df['r'].mean()
+   #    r_sigma = df['r'].std()
+   #    df['r'] -= r_mean
+   #    df['r'] /= (r_sigma + np.finfo(np.float32).eps)
 
-      et_mean = df['Et'].mean()
-      et_sigma = df['Et'].std()
-      df['Et'] -= et_mean
-      df['Et'] /= (et_sigma + np.finfo(np.float32).eps)
+   #    et_mean = df['Et'].mean()
+   #    et_sigma = df['Et'].std()
+   #    df['Et'] -= et_mean
+   #    df['Et'] /= (et_sigma + np.finfo(np.float32).eps)
 
-      # build the model inputs
-      df_inputs = df[include_cols].to_numpy()
+   # build the model inputs
+   df_inputs = df[include_cols].to_numpy()
+
+   # smear data
+   if gconfig['data']['smear'] and training:
+      smear = np.random.normal(gconfig['data']['smear_mean'],gconfig['data']['smear_sigma'], df_inputs.shape)
+      df_inputs *= smear
 
    # stuff ragged event sizes into fixed size
    inputs = np.zeros([gnum_points,gnum_features])
@@ -141,13 +146,12 @@ def load_csv_file_py(filename,training=False):
    inputs[0:df_inputs.shape[0],...] = df_inputs[0:df_inputs.shape[0],...]
 
    # build the labels
-   df_labels = df[['pid']]
+   df_labels = df.pid
    # map pid to class label
-   df_labels = df_labels.replace({'pid':labels_dict})
+   df_labels = df_labels.map(labels_dict)
 
    # convert to numpy
    df_labels = df_labels.to_numpy()
-   df_labels = np.squeeze(df_labels,-1)
 
    # count number of each class
    # use the lowest to decide weights for loss function

@@ -5,16 +5,17 @@ import time,logging,sklearn,json,os
 logger = logging.getLogger(__name__)
 
 
-def one_train_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,batches_per_epoch):
-   return one_epoch(config,dataset,net,train_step,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,True)
+def one_train_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,gtape):
+   return one_epoch(config,dataset,net,train_step,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,True,gtape=gtape)
 
 
-def one_eval_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,jet_writer,ele_writer,bkg_writer):
-   return one_epoch(config,dataset,net,test_step,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,False,jet_writer,ele_writer,bkg_writer)
+def one_eval_epoch(config,dataset,net,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,jet_writer,ele_writer,bkg_writer,mean_writer):
+   return one_epoch(config,dataset,net,test_step,loss_func,opt,epoch_num,tbwriter,batches_per_epoch,False,jet_writer,ele_writer,bkg_writer,mean_writer)
 
 
 def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
-              batches_per_epoch,training,jet_writer=None,ele_writer=None,bkg_writer=None):
+              batches_per_epoch,training,jet_writer=None,ele_writer=None,
+              bkg_writer=None,mean_writer=None,gtape=None):
    
    # get configuration information
    first_batch    = (epoch_num == 0)
@@ -30,6 +31,7 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
    hvd            = config.get('hvd',None)
    balanced       = config['loss']['balanced']
    training_str   = 'training' if training else 'testing'
+
    
    # used for accuracy check
    softmax        = tf.keras.layers.Softmax()
@@ -76,7 +78,19 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
          nonzero_to_class_scaler = 1.
       
       # run forward/backward pass
-      loss_value,logits = step_func(net,loss_func,inputs,labels,weights,opt,first_batch,hvd,nonzero_to_class_scaler)
+      loss_value,logits = step_func(net,loss_func,inputs,labels,weights,opt,nonzero_to_class_scaler,gtape=gtape)
+
+      # Horovod: broadcast initial variable states from rank 0 to all other processes.
+      # This is necessary to ensure consistent initialization of all workers when
+      # training is started with random weights or restored from a checkpoint.
+      #
+      # Note: broadcast should be done after the first gradient step to ensure optimizer
+      # initialization.
+      if first_batch and training and hvd:
+         hvd.broadcast_variables(net.variables, root_rank=0)
+         hvd.broadcast_variables(opt.variables(), root_rank=0)
+         first_batch = False
+   
 
       # number of non-zero points in this batch
       nonzero = tf.math.reduce_sum(weights)
@@ -104,7 +118,6 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
       status_confusion_matrix += confusion_matrix
       status_iou += iou
 
-      first_batch = False
       batch_num += 1
       
       # do monitoring periodically
@@ -192,10 +205,10 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
       for row in range(total_confusion_matrix.shape[0]):
          total_confusion_matrix[row,:] = total_confusion_matrix[row,:] / np.sum(total_confusion_matrix[row,:])
 
-      logger.info('confusion_matrix = \n %s',total_confusion_matrix)
+      logger.info('%s confusion_matrix = \n %s',training_str,total_confusion_matrix)
 
       total_iou = total_iou / batch_num / nranks
-      logger.info('iou = %s',total_iou)
+      logger.info('%s iou = %s',training_str,total_iou)
       if not training:
          step = (epoch_num + 1) * batches_per_epoch
          with tbwriter.as_default():
@@ -208,6 +221,8 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
             tf.summary.scalar('metrics/iou',total_iou[1],step=step)
          with bkg_writer.as_default():
             tf.summary.scalar('metrics/iou',total_iou[2],step=step)
+         with mean_writer.as_default():
+            tf.summary.scalar('metrics/iou',np.mean(total_iou),step=step)
 
          json.dump(confusion_matrix.tolist(),open(os.path.join(logdir,f'epoch{epoch_num+1:03d}_confustion_matrix_{training_str}.json'),'w'))
       else:
@@ -217,62 +232,66 @@ def one_epoch(config,dataset,net,step_func,loss_func,opt,epoch_num,tbwriter,
 
          json.dump(confusion_matrix.tolist(),open(os.path.join(logdir,f'epoch{epoch_num+1:03d}_confustion_matrix_{training_str}.json'),'w'))
    
-   return loss_value.numpy(),acc,total_confusion_matrix,batch_num,batches_per_epoch
+   output = {
+      "loss":  total_loss.mean(),
+      "acc":   acc,
+      "mIoU":  np.mean(total_iou),
+      "jIoU":  total_iou[0],
+      "eIoU":  total_iou[1],
+      "bIoU":  total_iou[2],
+      "confmat": confusion_matrix,
+      "batch_num": batch_num,
+      "batches_per_epoch": batches_per_epoch,
+   }
+
+   return output
 
 
 @tf.function
-def train_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd=None,scaler=1.,root_rank=0):
+def train_step(net,loss_func,inputs,labels,weights,opt=None,scaler=1.,gtape=None):
    
-   with tf.GradientTape() as tape:
+   with gtape:
       logits = net(inputs, training=True)
       # pred shape: [batches,points,classes]
       # labels shape: [batches,points]
       loss_value = loss_func(labels, logits)
       # tf.print(loss_value.shape)
       # loss_value shape: [batches,points]
+      # cast to float for calculations
+      weights = tf.cast(weights,tf.float32)
       # zero out non useful points
-      # loss_value *= weights
+      loss_value *= weights
       # loss_value shape: [batches,points]
-      loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(weights,out_type=tf.float32) / tf.math.reduce_sum(weights))
+      loss_value = tf.math.reduce_mean(loss_value)
       # loss_value shape: [1]
 
       # include regularization losses
       loss_value += tf.reduce_sum(net.losses)
 
       loss_value *= scaler
-
+      # loss_value = opt.get_scaled_loss(loss_value)
       # tf.print('net.losses',net.losses)
    
-   if hvd:
-      tape = hvd.DistributedGradientTape(tape)
-   grads = tape.gradient(loss_value, net.trainable_variables)
+   grads = gtape.gradient(loss_value, net.trainable_variables)
+   # grads = opt.get_unscaled_gradients(grads)
    opt.apply_gradients(zip(grads, net.trainable_variables))
-   # Horovod: broadcast initial variable states from rank 0 to all other processes.
-   # This is necessary to ensure consistent initialization of all workers when
-   # training is started with random weights or restored from a checkpoint.
-   #
-   # Note: broadcast should be done after the first gradient step to ensure optimizer
-   # initialization.
-   if hvd and first_batch:
-      hvd.broadcast_variables(net.variables, root_rank=root_rank)
-      hvd.broadcast_variables(opt.variables(), root_rank=root_rank)
    
    return loss_value,logits
 
 
 @tf.function
-def test_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd=None,scaler=1.,root_rank=0):
+def test_step(net,loss_func,inputs,labels,weights,opt=None,scaler=1.,gtape=None):
    # training=False is only needed if there are layers with different
    # behavior during training versus inference (e.g. Dropout).
    logits = net(inputs, training=False)
    # run loss function
    loss_value = loss_func(labels, logits)
    # cast to float for calculations
-   # weights = tf.cast(weights,tf.float32)
+   weights = tf.cast(weights,tf.float32)
    # zero out non useful points
-   # loss_value *= weights
+   loss_value *= weights
    # reduce by mean and scale by the number of non-zero points
-   loss_value = tf.math.reduce_mean(loss_value)  # * (tf.size(weights,out_type=tf.float32) / tf.math.reduce_sum(weights))
+   loss_value = tf.math.reduce_mean(loss_value)
    
    # include regularization losses
    loss_value += tf.reduce_sum(net.losses)

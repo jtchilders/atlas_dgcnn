@@ -34,8 +34,10 @@ LOGDIR=logdir/$COBALT_JOBID/$(date +"%Y-%m-%d-%H-%M")
 mkdir -p $LOGDIR
 echo $LOGDIR
 cp $0 logdir/$COBALT_JOBID.sh
+CONFIG=configs/atlas_dgcnn_thetagpu.json
+cp $CONFIG logdir/$COBALT_JOBID.json
 #export TF_ENABLE_AUTO_MIXED_PRECISION=1
 # export TF_XLA_FLAGS=--tf_xla_auto_jit=1
 #export TF_XLA_FLAGS=--tf_xla_auto_jit=fusible
-$EXEC main.py -c configs/atlas_dgcnn_thetagpu.json --interop $OMP_NUM_THREADS --intraop $OMP_NUM_THREADS \
-   --logdir $LOGDIR $HOROVOD #--batch-term 20 #--profiler 
+$EXEC main.py -c $CONFIG --interop $OMP_NUM_THREADS --intraop $OMP_NUM_THREADS \
+   --logdir $LOGDIR $HOROVOD # --batch-term 20 #--profiler 

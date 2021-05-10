@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-import argparse,logging,json,time,os,sys
+import argparse,logging,json,time,os,sys,socket
 os.environ['TF_CPP_MIN_VLOG_LEVEL'] = '4'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '4'
 import numpy as np
@@ -7,8 +7,6 @@ import tensorflow as tf
 import warnings
 warnings.filterwarnings("ignore",category=UserWarning)
 import tensorflow_addons as tfa
-#from tensorflow.python.client import device_lib
-from tensorflow.keras.mixed_precision import experimental as mixed_precision
 import data_handler
 import model,lr_func,losses,accuracies
 import sklearn.metrics
@@ -32,8 +30,6 @@ def main():
    parser.add_argument('--profiler',default=False, action='store_true', help='Use TF profiler, needs CUPTI in LD_LIBRARY_PATH for Cuda')
    parser.add_argument('--profrank',default=0,type=int,help='set which rank to profile')
 
-   parser.add_argument('--precision',default='float32',help='set which precision to use; options include: "float32","mixed_float16","mixed_bfloat16"')
-
    parser.add_argument('--batch-term',dest='batch_term',type=int,help='if set, terminates training after the specified number of batches',default=0)
 
    parser.add_argument('--evaluate',help='evaluate a pre-trained model file on the test data set only.')
@@ -51,6 +47,7 @@ def main():
    logging_format = '%(asctime)s %(levelname)s:%(process)s:%(thread)s:%(name)s:%(message)s'
    logging_datefmt = '%Y-%m-%d %H:%M:%S'
    logging_level = logging.INFO
+   gtape = tf.GradientTape()
    if args.horovod:
       print('importing horovod')
       sys.stdout.flush()
@@ -65,6 +62,8 @@ def main():
       nranks = hvd.size()
       if rank > 0:
          logging_level = logging.WARNING
+
+      gtape = hvd.DistributedGradientTape(gtape)
    
    # Setup Logging
    if args.debug and not args.error and not args.warning:
@@ -82,8 +81,8 @@ def main():
                        filename=args.logfilename)
    
    if hvd:
-      logging.warning('rank: %5d   size: %5d  local rank: %5d  local size: %5d',
-                      hvd.rank(), hvd.size(),
+      logging.warning('host: %s rank: %5d   size: %5d  local rank: %5d  local size: %5d',
+                      socket.gethostname(),hvd.rank(), hvd.size(),
                       hvd.local_rank(), hvd.local_size())
    
    tf.config.threading.set_inter_op_parallelism_threads(args.interop)
@@ -96,7 +95,7 @@ def main():
       tf.config.experimental.set_memory_growth(gpu, True)
    if hvd and len(gpus) > 0:
       tf.config.set_visible_devices(gpus[hvd.local_rank() % len(gpus)],'GPU')
-   
+
    logging.info(   'using tensorflow version:   %s (%s)',tf.__version__,tf.__git_version__)
    logging.info(   'using tensorflow from:      %s',tf.__file__)
    if hvd:
@@ -130,6 +129,12 @@ def main():
       config['model_file'] = args.train_more
       logger.info('continuing model file:      %s',args.train_more)
 
+
+   # using mixed precision?
+   if isinstance(config['model']['mixed_precision'],str):
+      logger.info('using mixed precsion:       %s',config['model']['mixed_precision'])
+      tf.keras.mixed_precision.set_global_policy(config['model']['mixed_precision'])
+
    logger.info('-=-=-=-=-=-=-=-=-  CONFIG FILE -=-=-=-=-=-=-=-=-')
    logger.info('%s = \n %s',args.config_filename,json.dumps(config,indent=4,sort_keys=True))
    logger.info('-=-=-=-=-=-=-=-=-  CONFIG FILE -=-=-=-=-=-=-=-=-')
@@ -144,6 +149,8 @@ def main():
    net = model.get_model(config)
    loss_func = losses.get_loss(config)
    opt = get_optimizer(config)
+   if isinstance(config['model']['mixed_precision'],str):
+      opt = tf.keras.mixed_precision.LossScaleOptimizer(opt)
 
    # initialize and create the model
    # input_shape = [config['data']['batch_size'],config['data']['num_points'],config['data']['num_features']]
@@ -165,6 +172,7 @@ def main():
    test_jet_writer = None
    test_ele_writer = None
    test_bkg_writer = None
+   test_mean_writer = None
    if rank == 0:
       train_summary_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'train')
       test_summary_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'test')
@@ -172,6 +180,7 @@ def main():
       test_jet_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'jet_iou')
       test_ele_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'ele_iou')
       test_bkg_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'bkg_iou')
+      test_mean_writer = tf.summary.create_file_writer(args.logdir + os.path.sep + 'mean_iou')
 
       #tf.keras.utils.plot_model(net, "network_model.png", show_shapes=True)
       
@@ -179,25 +188,37 @@ def main():
         #tf.summary.graph(train_step.get_concrete_function().graph)
 
    batches_per_epoch = 0
+   train_mIoU_sum = 0.
+   test_mIoU_sum = 0.
    for epoch_num in range(config['training']['epochs']):
       
       logger.info('begin epoch %s',epoch_num)
 
-      loss = 0.
-      acc = 0.
-      confusion_matrix = None
-      batch_num = 0.
       if not config['evaluate']:
-         loss,acc,confusion_matrix,batch_num,batches_per_epoch = \
-               epoch_loop.one_train_epoch(config,trainds,net,
-                                 loss_func,opt,epoch_num,train_summary_writer,
-                                 batches_per_epoch)
+         train_output = epoch_loop.one_train_epoch(config,trainds,net,
+                                                   loss_func,opt,epoch_num,
+                                                   train_summary_writer,
+                                                   batches_per_epoch,
+                                                   gtape)
+         batches_per_epoch = train_output['batches_per_epoch']
+         train_mIoU_sum += train_output['mIoU']
+         logger.info('train mIoU sum: %10.4f',train_mIoU_sum / (epoch_num + 1))
 
-      loss,acc,confusion_matrix,batch_num,batches_per_epoch = \
-            epoch_loop.one_eval_epoch(config,testds,net,
-                                 loss_func,opt,epoch_num,test_summary_writer,
-                                 batches_per_epoch,test_jet_writer,
-                                 test_ele_writer,test_bkg_writer)
+      test_output = epoch_loop.one_eval_epoch(config,testds,net,
+                                              loss_func,opt,epoch_num,
+                                              test_summary_writer,
+                                              batches_per_epoch,
+                                              test_jet_writer,
+                                              test_ele_writer,
+                                              test_bkg_writer,
+                                              test_mean_writer)
+      test_mIoU_sum += test_output['mIoU']
+      logger.info('test mIoU sum: %10.4f',test_mIoU_sum / (epoch_num + 1))
+
+      if rank == 0:
+         with test_summary_writer.as_default():
+            step = (epoch_num + 1) * batches_per_epoch
+            tf.summary.scalar('metrics/mIoU_AOC', test_mIoU_sum / (epoch_num + 1),step=step)
 
 
 def get_optimizer(config):
