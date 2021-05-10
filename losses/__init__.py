@@ -4,8 +4,10 @@ logger = logging.getLogger('loss')
 
 __all__ = ['focal_loss_softmax','SparseCategoricalFocalLoss']
 from . import focal_loss_softmax
-from focal_loss import SparseCategoricalFocalLoss
-
+try:
+   from focal_loss import SparseCategoricalFocalLoss
+except:
+   logger.warning('no focal_loss module installed')
 
 def get_loss(config):
    loss_name = config['loss']['name']
