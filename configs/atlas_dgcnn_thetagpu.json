@@ -51,7 +51,7 @@
       },
       "name": "CosineDecayRestarts"
    },
-   "lossA": {
+   "loss": {
       "name":                          "SparseCategoricalCrossentropy",
       "args": {
          "from_logits":                true,
