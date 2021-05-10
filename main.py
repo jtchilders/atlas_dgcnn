@@ -47,7 +47,6 @@ def main():
    logging_format = '%(asctime)s %(levelname)s:%(process)s:%(thread)s:%(name)s:%(message)s'
    logging_datefmt = '%Y-%m-%d %H:%M:%S'
    logging_level = logging.INFO
-   gtape = tf.GradientTape()
    if args.horovod:
       print('importing horovod')
       sys.stdout.flush()
@@ -63,8 +62,6 @@ def main():
       if rank > 0:
          logging_level = logging.WARNING
 
-      gtape = hvd.DistributedGradientTape(gtape)
-   
    # Setup Logging
    if args.debug and not args.error and not args.warning:
       logging_level = logging.DEBUG
@@ -104,6 +101,11 @@ def main():
    logging.info(   'logdir:                     %s',args.logdir)
    logging.info(   'interop:                    %s',args.interop)
    logging.info(   'intraop:                    %s',args.intraop)
+   
+   # this must be created after the config settings
+   gtape = tf.GradientTape()
+   if args.horovod:
+      gtape = hvd.DistributedGradientTape(gtape)
 
    config = json.load(open(args.config_filename))
    # config['device'] = device_str
