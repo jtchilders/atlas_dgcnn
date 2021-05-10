@@ -26,5 +26,5 @@ echo $LOGDIR
 cp $0 $LOGDIR/
 
 $EXEC main.py -c configs/atlas_dgcnn_jlse.json --interop $OMP_NUM_THREADS --intraop $OMP_NUM_THREADS \
-   --logdir $LOGDIR $HOROVOD --profiler --batch-term 50
+   --logdir $LOGDIR $HOROVOD #--profiler --batch-term 50
 
