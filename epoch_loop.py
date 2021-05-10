@@ -227,7 +227,7 @@ def train_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hv
       logits = net(inputs, training=True)
       # pred shape: [batches,points,classes]
       # labels shape: [batches,points]
-      loss_value = loss_func(labels, logits,sample_weight=weights)
+      loss_value = loss_func(labels, logits)
       # tf.print(loss_value.shape)
       # loss_value shape: [batches,points]
       # zero out non useful points
@@ -266,7 +266,7 @@ def test_step(net,loss_func,inputs,labels,weights,opt=None,first_batch=False,hvd
    # behavior during training versus inference (e.g. Dropout).
    logits = net(inputs, training=False)
    # run loss function
-   loss_value = loss_func(labels, logits,sample_weight=weights)
+   loss_value = loss_func(labels, logits)
    # cast to float for calculations
    # weights = tf.cast(weights,tf.float32)
    # zero out non useful points

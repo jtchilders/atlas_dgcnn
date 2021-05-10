@@ -42,13 +42,21 @@
       },
       "name": "CosineDecayRestarts"
    },
-   "loss": {
+   "lossA": {
       "name":                          "SparseCategoricalCrossentropy",
       "args": {
          "from_logits":                true,
          "reduction":                  "none"
       },
-      "balanced":                      true
+      "balanced":                      false
+   },
+   "loss": {
+      "name":                          "SparseCategoricalFocalLoss",
+      "args": {
+         "from_logits":                true,
+         "gamma":                      3
+      },
+      "balanced":                      false
    },
    "accuracy": {
       "name":                          "simple_class_accuracy"

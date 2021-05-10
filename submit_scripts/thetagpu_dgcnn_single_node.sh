@@ -11,9 +11,10 @@
 MCONDA=/lus/theta-fs0/software/thetagpu/conda/tf_master/2021-03-02/mconda3
 
 source $MCONDA/setup.sh
-
+echo COBALT_NODEFILE contents: 
+cat $COBALT_NODEFILE
 NODES=`cat $COBALT_NODEFILE | wc -l`
-PPN=8
+PPN=1
 RANKS=$((NODES * PPN))
 echo NODES=$NODES  PPN=$PPN  RANKS=$RANKS
 
